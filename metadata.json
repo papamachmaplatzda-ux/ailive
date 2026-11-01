@@ -1,0 +1,6 @@
+{
+  "name": "BERLIN HBF // Isometrische Bahnhof-Simulation & RPG",
+  "description": "Isometrische 2D-RPG-Simulation im Berliner Hauptbahnhof über alle 4 Ebenen mit Echtzeit-Zugfahrplan, KI-Pendlerrouten, Geschäften und Bahnsteigen.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
