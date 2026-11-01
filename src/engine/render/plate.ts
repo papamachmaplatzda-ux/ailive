@@ -21,6 +21,19 @@ export interface PlateDrawOptions {
   frame?: boolean;
   /** Opacity of the whole plate (used for cross-fades while art loads). */
   alpha?: number;
+  /** Fraction of the source height cropped at the top (AI plates carry a header strip). */
+  cropTopRatio?: number;
+}
+
+/** Pixel size of a drawable source (image or already-baked canvas). */
+export function plateSourceSize(src: CanvasImageSource): { w: number; h: number } | null {
+  if (src instanceof HTMLImageElement) {
+    return src.naturalWidth > 0 ? { w: src.naturalWidth, h: src.naturalHeight } : null;
+  }
+  if (src instanceof HTMLCanvasElement || src instanceof OffscreenCanvas) {
+    return src.width > 0 ? { w: src.width, h: src.height } : null;
+  }
+  return null;
 }
 
 /** Draw the plate into `rect` with the current quality and lighting. */
@@ -30,7 +43,7 @@ export function drawScenePlate(
   rect: Rect,
   opts: PlateDrawOptions
 ) {
-  const { quality, atmosphere, frame = true, alpha = 1 } = opts;
+  const { quality, atmosphere, frame = true, alpha = 1, cropTopRatio = 0 } = opts;
 
   ctx.save();
   ctx.globalAlpha = alpha;
@@ -40,7 +53,22 @@ export function drawScenePlate(
     ctx.fillRect(rect.x + 6, rect.y + 8, rect.w, rect.h);
   }
 
-  ctx.drawImage(plate, rect.x, rect.y, rect.w, rect.h);
+  const size = cropTopRatio > 0 ? plateSourceSize(plate) : null;
+  if (size) {
+    ctx.drawImage(
+      plate,
+      0,
+      size.h * cropTopRatio,
+      size.w,
+      size.h * (1 - cropTopRatio),
+      rect.x,
+      rect.y,
+      rect.w,
+      rect.h
+    );
+  } else {
+    ctx.drawImage(plate, rect.x, rect.y, rect.w, rect.h);
+  }
 
   if (quality !== 'raw' && atmosphere) {
     // Tint: multiply keeps the art's contrast while shifting its time of day.

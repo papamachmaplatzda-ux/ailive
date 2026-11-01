@@ -8,9 +8,9 @@ import {
 } from '../game/rules';
 import { Camera } from '../engine/camera';
 import { atmosphereForMinutes } from '../engine/atmosphere';
-import { AssetTier, RenderQuality, SceneDef, VenueDef } from '../engine/types';
+import { AssetTier, PlateDef, RenderQuality, SceneDef, VenueDef } from '../engine/types';
 import { getBakedPlate, isReady, loadImage, resolvePlate } from '../engine/assets';
-import { drawScenePlate } from '../engine/render/plate';
+import { drawScenePlate, plateSourceSize } from '../engine/render/plate';
 import {
   drawCommuter,
   drawIsoBox,
@@ -85,6 +85,39 @@ function buildWalkers(scenes: SceneDef[]): AmbientWalker[] {
   return walkers;
 }
 
+interface ResolvedSceneArt {
+  plate: PlateDef;
+  source: CanvasImageSource;
+  width: number;
+  height: number;
+}
+
+/**
+ * Pick the best plate a scene currently owns and bake it at the active quality.
+ * Every venue goes through this, so a new art tier or a new scene needs no
+ * renderer change — and a scene whose art is still loading returns null so the
+ * caller can fall back to the procedural build.
+ */
+function resolveSceneArt(
+  scene: SceneDef,
+  tier: AssetTier,
+  quality: RenderQuality,
+  useAltVariant: boolean
+): ResolvedSceneArt | null {
+  const plate = resolvePlate(scene.plates, tier, useAltVariant ? 'b' : undefined);
+  if (!plate) return null;
+
+  const img = loadImage(plate.src);
+  if (!isReady(img)) return null;
+
+  const baked = getBakedPlate(plate, img, quality);
+  const source: CanvasImageSource = baked ?? img;
+  const size = plateSourceSize(source);
+  if (!size) return null;
+
+  return { plate, source, width: size.w, height: size.h };
+}
+
 
 export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
   venue,
@@ -102,6 +135,8 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const cameraRef = useRef<Camera>(new Camera());
+  const panRef = useRef({ x: 0, y: 0 });
+  const zoomRef = useRef(1);
   const walkersRef = useRef<AmbientWalker[]>(buildWalkers(venue.scenes));
   const dragRef = useRef<{ active: boolean; startX: number; startY: number; origX: number; origY: number }>({
     active: false,
@@ -132,6 +167,8 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
   // Reset pan/zoom when the view changes
   useEffect(() => {
     cameraRef.current.reset();
+    panRef.current = { x: 0, y: 0 };
+    zoomRef.current = 1;
   }, [activeView, renderStyle]);
 
   useEffect(() => {
@@ -437,6 +474,7 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
           }
         }
       }
+    };
 
     // Ambient crowd, driven by the active scene's crowd routes. Works for any
     // venue, not just the station.
@@ -485,7 +523,7 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
       h: number,
       nowSec: number
     ) => {
-      drawIsometricEngineeringGrid(c, w, h, 36);
+      drawIsometricGrid(c, w, h, 36);
 
       const cx = w * 0.5 + panRef.current.x;
       const cy = h * 0.52 + panRef.current.y;
@@ -911,13 +949,14 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
 
       const w = canvas.width;
       const h = canvas.height;
+      const atmosphere = atmosphereForMinutes(stationMinutesRef.current);
       ctx.clearRect(0, 0, w, h);
 
       // =========================================================================
       // MODE 3: ALL 6 LEVELS OVERVIEW GRID ('all_levels_grid')
       // =========================================================================
       if (renderStyle === 'all_levels_grid') {
-        drawIsometricEngineeringGrid(ctx, w, h, 32);
+        drawIsometricGrid(ctx, w, h, 32);
 
         const topPad = Math.max(48, h * 0.065);
         const botPad = 14;
@@ -928,11 +967,12 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
         const cellW = (w - sidePad * 2 - gap * (cols - 1)) / cols;
         const cellH = (h - topPad - botPad - gap * (rows - 1)) / rows;
 
-        STATION_BLUEPRINTS.forEach((bp, idx) => {
+        scenes.forEach((scene, idx) => {
           const col = idx % cols;
           const row = Math.floor(idx / cols);
           const x = sidePad + col * (cellW + gap);
           const y = topPad + row * (cellH + gap);
+          const art = resolveSceneArt(scene, assetTier, renderQuality, useAltE0Variant);
 
           ctx.save();
           ctx.beginPath();
@@ -942,22 +982,11 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
           ctx.fillStyle = '#3b4049';
           ctx.fillRect(x, y, cellW, cellH);
 
-          const imgUrl =
-            bp.viewId === 'E0' && useAltE0Variant && bp.altReferenceImage
-              ? bp.altReferenceImage
-              : bp.referenceImage;
-          const img = imagesRef.current[imgUrl];
-
-          if (img && img.complete && img.naturalWidth > 0) {
-            const cropTopRatio = bp.viewId === 'CUTAWAY' ? 0 : 0.062;
-            const srcX = 0;
-            const srcY = img.naturalHeight * cropTopRatio;
-            const srcW = img.naturalWidth;
-            const srcH = img.naturalHeight * (1 - cropTopRatio);
-
+          if (art) {
+            const crop = art.plate.cropTopRatio ?? 0;
+            const imgAspect = art.width / (art.height * (1 - crop));
             const contentY = y + 26;
             const contentH = cellH - 26;
-            const imgAspect = srcW / srcH;
             const cellAspect = cellW / contentH;
             let drawW = cellW;
             let drawH = contentH;
@@ -970,26 +999,32 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
             }
             const dx = x + (cellW - drawW) * 0.5;
             const dy = contentY + (contentH - drawH) * 0.5;
-            ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, drawW, drawH);
-            drawBlueprintLiveOverlays(ctx, bp.viewId, dx, dy, drawW, drawH, nowSec, 0.52);
+            drawScenePlate(
+              ctx,
+              art.source,
+              { x: dx, y: dy, w: drawW, h: drawH },
+              { quality: renderQuality, atmosphere, frame: false, cropTopRatio: crop }
+            );
+            drawBlueprintLiveOverlays(ctx, scene.id as StationViewId, dx, dy, drawW, drawH, nowSec, 0.52);
+            drawCrowd(ctx, scene.id, dx, dy, drawW, drawH, nowSec, 0.52);
           }
 
           // Card Header Bar matching the reference style
           ctx.fillStyle = 'rgba(30, 34, 41, 0.96)';
           ctx.fillRect(x, y, cellW, 26);
-          ctx.fillStyle = bp.color;
+          ctx.fillStyle = scene.color;
           ctx.fillRect(x, y, 5, 26);
 
           ctx.fillStyle = '#f1f5f9';
           ctx.font = 'bold 11px monospace';
           ctx.textAlign = 'left';
-          ctx.fillText(`${bp.shortCode} — ${bp.subtitle.split('·')[0].trim()}`, x + 12, y + 17);
+          ctx.fillText(`${scene.shortCode} — ${scene.subtitle.split('·')[0].trim()}`, x + 12, y + 17);
 
           ctx.restore();
 
           // Border highlight
-          ctx.strokeStyle = bp.viewId === activeView ? '#f59e0b' : '#535869';
-          ctx.lineWidth = bp.viewId === activeView ? 2.5 : 1.2;
+          ctx.strokeStyle = scene.id === activeView ? '#f59e0b' : '#535869';
+          ctx.lineWidth = scene.id === activeView ? 2.5 : 1.2;
           ctx.beginPath();
           ctx.roundRect(x, y, cellW, cellH, 8);
           ctx.stroke();
@@ -1005,27 +1040,18 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
       // MODE 1: HIGH-RES REFERENCE TILEMAP + LIVE SIMULATION ('reference_live')
       // =========================================================================
       else {
-        drawIsometricEngineeringGrid(ctx, w, h, 36);
+        drawIsometricGrid(ctx, w, h, 36);
 
-        const bp =
-          STATION_BLUEPRINTS.find((b) => b.viewId === activeView) ?? STATION_BLUEPRINTS[2];
-        const imgUrl =
-          bp.viewId === 'E0' && useAltE0Variant && bp.altReferenceImage
-            ? bp.altReferenceImage
-            : bp.referenceImage;
-        const img = imagesRef.current[imgUrl];
+        const art = activeScene
+          ? resolveSceneArt(activeScene, assetTier, renderQuality, useAltE0Variant)
+          : null;
 
-        if (img && img.complete && img.naturalWidth > 0) {
-          const cropTopRatio = bp.viewId === 'CUTAWAY' ? 0 : 0.062;
-          const srcX = 0;
-          const srcY = img.naturalHeight * cropTopRatio;
-          const srcW = img.naturalWidth;
-          const srcH = img.naturalHeight * (1 - cropTopRatio);
-
+        if (activeScene && art) {
+          const crop = art.plate.cropTopRatio ?? 0;
           const topMargin = 36;
           const availW = w;
           const availH = h - topMargin;
-          const imgAspect = srcW / srcH;
+          const imgAspect = art.width / (art.height * (1 - crop));
           const viewAspect = availW / availH;
 
           let baseW = availW;
@@ -1043,18 +1069,29 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
           const dx = (w - drawW) * 0.5 + panRef.current.x;
           const dy = topMargin + (availH - drawH) * 0.5 + panRef.current.y;
 
-          // Subtle drop shadow under the tilemap board
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
-          ctx.fillRect(dx + 6, dy + 8, drawW, drawH);
+          // Baked + graded plate, time-of-day lighting and frame from the engine.
+          drawScenePlate(
+            ctx,
+            art.source,
+            { x: dx, y: dy, w: drawW, h: drawH },
+            { quality: renderQuality, atmosphere, cropTopRatio: crop }
+          );
 
-          // Draw the crisp reference tilemap architecture without the duplicate top header strip
-          ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, drawW, drawH);
-
-          // Draw live animated trains, buses, taxis, elevators, escalators, and commuters on top!
+          // Live animated trains, buses, taxis, elevators, escalators and commuters on top.
           const scaleFactor = Math.max(0.75, Math.min(1.8, drawW / 1280));
-          drawBlueprintLiveOverlays(ctx, bp.viewId, dx, dy, drawW, drawH, nowSec, scaleFactor);
+          drawBlueprintLiveOverlays(
+            ctx,
+            activeScene.id as StationViewId,
+            dx,
+            dy,
+            drawW,
+            drawH,
+            nowSec,
+            scaleFactor
+          );
+          drawCrowd(ctx, activeScene.id, dx, dy, drawW, drawH, nowSec, scaleFactor);
         } else {
-          // Fallback while image loads
+          // Fallback while art loads
           drawProceduralLevel(ctx, activeView, w, h, nowSec);
         }
       }
@@ -1070,7 +1107,20 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
       if (timerId !== null) window.clearTimeout(timerId);
       window.removeEventListener('resize', handleResize);
     };
-  }, [activeView, renderStyle, useAltE0Variant, simSpeed, showLabels]);
+  }, [
+    venue,
+    activeScene,
+    activeView,
+    renderStyle,
+    useAltE0Variant,
+    simSpeed,
+    showLabels,
+    renderQuality,
+    assetTier,
+    stationMinutesRef,
+    trainsRef,
+    npcsRef,
+  ]);
 
   // Mouse drag pan & wheel zoom handlers (plus click-to-select in 6-level grid mode)
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1084,8 +1134,8 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
       const col = Math.floor((mx / rect.width) * cols);
       const row = Math.floor(((my - topPad) / (rect.height - topPad)) * rows);
       const idx = row * cols + col;
-      if (idx >= 0 && idx < STATION_BLUEPRINTS.length) {
-        onSelectView(STATION_BLUEPRINTS[idx].viewId);
+      if (idx >= 0 && idx < scenes.length) {
+        onSelectView(scenes[idx].id as StationViewId);
       }
       return;
     }

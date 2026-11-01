@@ -10,7 +10,7 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { Campaign, MapPin, Compass } from 'lucide-react';
+import { Building2, MapPin, Compass } from 'lucide-react';
 import { Camera } from '../engine/camera';
 import { atmosphereForMinutes } from '../engine/atmosphere';
 import { drawIsometricGrid } from '../engine/render/primitives';
@@ -334,7 +334,7 @@ export const CityMapCanvas: React.FC<CityMapCanvasProps> = ({
       {/* City stats strip */}
       <div className="fixed left-3 top-12 z-20 bg-[#1f232a]/92 backdrop-blur-md border border-[#4b5262] rounded p-2.5 shadow-xl pointer-events-none">
         <div className="flex items-center gap-2 mb-1">
-          <Campaign className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+          <Building2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
           <span className="text-xs font-mono font-bold text-white">{city.name}</span>
         </div>
         <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] font-mono text-slate-300">

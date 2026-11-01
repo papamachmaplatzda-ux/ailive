@@ -27,8 +27,7 @@ services:
     command:
       - sh
       - -ec
-      # --legacy-peer-deps: the repo pins esbuild ^0.25 while vite 8 wants ^0.27/^0.28.
-      - CI=true npm install --no-audit --no-fund --no-package-lock --legacy-peer-deps && exec npx vite --host 0.0.0.0 --port 3000
+      - CI=true npm install --no-audit --no-fund --no-package-lock && exec npx vite --host 0.0.0.0 --port 3000
     healthcheck:
       test:
         - CMD
