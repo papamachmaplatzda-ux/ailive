@@ -17,7 +17,7 @@ test('isometric projection and inverse roundtrip are accurate across levels', ()
   const centerY = 450;
   const zoom = 1.2;
 
-  for (const level of [2, 0, -1, -2] as const) {
+  for (const level of [2, 1, 0, -1, -2] as const) {
     const iso = worldToIso(3.5, -2.25, level, centerX, centerY, zoom, 'cutaway', 0);
     const back = isoToWorld(iso.sx, iso.sy, level, centerX, centerY, zoom, 'cutaway', 0);
     assert.ok(Math.abs(back.wx - 3.5) < 1e-6, `wx mismatch on level ${level}`);
@@ -25,13 +25,17 @@ test('isometric projection and inverse roundtrip are accurate across levels', ()
   }
 });
 
-test('multi-level pathfinding routes from Stadtbahn (+2) to Tiefbahnhof (-2)', () => {
+test('multi-level pathfinding routes across all 5 levels (+2, +1, 0, -1, -2)', () => {
+  const stepToGallery = findNextConnectorForLevel(2, 1, 0, 0);
+  assert.ok(stepToGallery !== null, 'Should find a connector from level 2 to gallery level 1');
+  assert.equal(stepToGallery.nextLevel, 1, 'Direct elevator hop from +2 to +1');
+
   const stepFromTop = findNextConnectorForLevel(2, -2, 0, 0);
   assert.ok(stepFromTop !== null, 'Should find a connector from level 2 toward level -2');
-  assert.equal(stepFromTop.nextLevel, 0, 'First hop from +2 should go to level 0');
 
-  const stepFromZero = findNextConnectorForLevel(0, -2, 1.5, -2.0);
-  assert.ok(stepFromZero !== null, 'Should find a connector from level 0 toward level -2');
+  const stepFromGalleryToUnderground = findNextConnectorForLevel(1, -1, 0, 0);
+  assert.ok(stepFromGalleryToUnderground !== null, 'Should route from E+1 to E-1');
+  assert.equal(stepFromGalleryToUnderground.nextLevel, 0, 'First hop from E+1 to E-1 goes via E0');
 });
 
 test('dynamic train timetable transitions through SCHEDULED -> APPROACHING -> BOARDING -> DEPARTING', () => {

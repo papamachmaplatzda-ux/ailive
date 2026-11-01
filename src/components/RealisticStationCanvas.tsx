@@ -1,7 +1,8 @@
 import React, { useEffect, useRef } from 'react';
 import {
-  STATION_TRACKS,
+  STATION_BLUEPRINTS,
   StationLevelId,
+  StationViewId,
 } from '../game/stationData';
 import {
   ScheduledTrain,
@@ -10,1795 +11,1487 @@ import {
   stepNpcAgent,
 } from '../game/rules';
 
-export type CameraPreset = 'overview' | 'concourse' | 'deep_tracks' | 'upper_tracks';
-export type RenderStyleMode = 'procedural_realistic' | 'hybrid_illustrated' | 'reference_art';
+export type RenderStyleMode = 'reference_live' | 'procedural_iso' | 'all_levels_grid';
 
 interface RealisticStationCanvasProps {
-  cameraPreset: CameraPreset;
+  activeView: StationViewId;
   renderStyle: RenderStyleMode;
-  timeScale: number;
-  lightingMode: 'warm_station' | 'daylight' | 'night';
+  useAltE0Variant: boolean;
+  simSpeed: number;
   showLabels: boolean;
   trainsRef: React.MutableRefObject<ScheduledTrain[]>;
   npcsRef: React.MutableRefObject<NpcAgent[]>;
-  stationClockRef: React.MutableRefObject<number>;
-  onTickClock: () => void;
+  stationMinutesRef: React.MutableRefObject<number>;
+  onSelectView?: (view: StationViewId) => void;
+}
+
+interface Point2D {
+  x: number;
+  y: number;
+}
+
+interface AmbientWalker {
+  id: number;
+  viewId: StationViewId;
+  path: { x: number; y: number }[];
+  segIndex: number;
+  segProgress: number;
+  speed: number;
+  dir: 1 | -1;
+  coatColor: string;
+  hairColor: string;
+  hasSuitcase: boolean;
+  suitcaseColor: string;
+  label?: string;
+}
+
+// Normalized coordinates (0..1) relative to the 16:9 reference blueprint image
+// for ambient commuters, shoppers, and staff on each of the 6 views
+function createBlueprintWalkers(): AmbientWalker[] {
+  const walkers: AmbientWalker[] = [];
+  let idCounter = 1;
+
+  const addWalker = (
+    viewId: StationViewId,
+    path: { x: number; y: number }[],
+    speed: number,
+    coatColor: string,
+    hasSuitcase: boolean,
+    label?: string
+  ) => {
+    walkers.push({
+      id: idCounter++,
+      viewId,
+      path,
+      segIndex: idCounter % Math.max(1, path.length - 1),
+      segProgress: (idCounter * 0.27) % 1,
+      speed,
+      dir: idCounter % 2 === 0 ? 1 : -1,
+      coatColor,
+      hairColor: idCounter % 3 === 0 ? '#fde047' : idCounter % 2 === 0 ? '#451a03' : '#1e293b',
+      hasSuitcase,
+      suitcaseColor: idCounter % 2 === 0 ? '#dc2626' : '#0284c7',
+      label,
+    });
+  };
+
+  // E+2: Upper platforms & SE entrance concourse
+  addWalker('E+2', [{ x: 0.16, y: 0.56 }, { x: 0.48, y: 0.78 }, { x: 0.68, y: 0.90 }], 0.045, '#1e293b', true, 'ICE 948');
+  addWalker('E+2', [{ x: 0.28, y: 0.42 }, { x: 0.56, y: 0.62 }, { x: 0.78, y: 0.77 }], 0.052, '#b91c1c', false, 'S7');
+  addWalker('E+2', [{ x: 0.44, y: 0.26 }, { x: 0.66, y: 0.42 }, { x: 0.84, y: 0.55 }], 0.038, '#0284c7', true);
+  addWalker('E+2', [{ x: 0.60, y: 0.72 }, { x: 0.74, y: 0.83 }, { x: 0.82, y: 0.89 }], 0.048, '#059669', false);
+  addWalker('E+2', [{ x: 0.34, y: 0.64 }, { x: 0.52, y: 0.52 }, { x: 0.64, y: 0.43 }], 0.041, '#d97706', true, 'RE 1');
+
+  // E+1: Gallery walkways, 2 DB Red Rondells, and Bügelbauten offices
+  addWalker('E+1', [{ x: 0.23, y: 0.26 }, { x: 0.36, y: 0.36 }, { x: 0.46, y: 0.45 }], 0.042, '#dc2626', false, 'DB Info');
+  addWalker('E+1', [{ x: 0.32, y: 0.47 }, { x: 0.40, y: 0.56 }, { x: 0.52, y: 0.67 }], 0.039, '#1e40af', true, 'DB Lounge');
+  addWalker('E+1', [{ x: 0.52, y: 0.28 }, { x: 0.66, y: 0.38 }, { x: 0.76, y: 0.46 }], 0.046, '#047857', false, 'Bügelbauten');
+  addWalker('E+1', [{ x: 0.38, y: 0.62 }, { x: 0.55, y: 0.74 }, { x: 0.72, y: 0.84 }], 0.044, '#7c2d12', true);
+  addWalker('E+1', [{ x: 0.25, y: 0.58 }, { x: 0.36, y: 0.50 }, { x: 0.48, y: 0.40 }], 0.036, '#4338ca', false);
+
+  // E0: Ground floor between Europaplatz (NW), Red Rondells, Cafes, and Washingtonplatz (SE)
+  addWalker('E0', [{ x: 0.14, y: 0.24 }, { x: 0.28, y: 0.35 }, { x: 0.38, y: 0.43 }], 0.044, '#0284c7', true, 'Europaplatz');
+  addWalker('E0', [{ x: 0.36, y: 0.43 }, { x: 0.44, y: 0.56 }, { x: 0.58, y: 0.68 }, { x: 0.82, y: 0.85 }], 0.048, '#b91c1c', true, 'Taxi');
+  addWalker('E0', [{ x: 0.52, y: 0.28 }, { x: 0.64, y: 0.37 }, { x: 0.72, y: 0.43 }], 0.037, '#d97706', false, 'Bakeral');
+  addWalker('E0', [{ x: 0.22, y: 0.60 }, { x: 0.32, y: 0.53 }, { x: 0.42, y: 0.60 }], 0.035, '#059669', false, 'Café');
+  addWalker('E0', [{ x: 0.86, y: 0.88 }, { x: 0.74, y: 0.78 }, { x: 0.60, y: 0.68 }], 0.046, '#1e293b', true, 'ICE 1001');
+
+  // E-1: Supermarket (NW), Pharmacy, Central Atrium, and U-Bahn U5 transfer corridor (NE)
+  addWalker('E-1', [{ x: 0.22, y: 0.24 }, { x: 0.31, y: 0.32 }, { x: 0.38, y: 0.39 }], 0.038, '#16a34a', false, 'Supermarkt');
+  addWalker('E-1', [{ x: 0.38, y: 0.42 }, { x: 0.52, y: 0.32 }, { x: 0.69, y: 0.24 }, { x: 0.79, y: 0.17 }], 0.052, '#2563eb', true, 'Zur U5');
+  addWalker('E-1', [{ x: 0.33, y: 0.54 }, { x: 0.44, y: 0.64 }, { x: 0.58, y: 0.74 }], 0.041, '#dc2626', false, 'Apotheke');
+  addWalker('E-1', [{ x: 0.56, y: 0.68 }, { x: 0.66, y: 0.58 }, { x: 0.75, y: 0.50 }], 0.039, '#d97706', false, 'Asia Bistro');
+  addWalker('E-1', [{ x: 0.46, y: 0.74 }, { x: 0.58, y: 0.82 }, { x: 0.68, y: 0.74 }], 0.043, '#475569', true);
+
+  // E-2: Deep underground platforms (Tracks 1-8) and U-Bahn U5 platform on the right
+  addWalker('E-2', [{ x: 0.22, y: 0.48 }, { x: 0.40, y: 0.62 }, { x: 0.56, y: 0.74 }], 0.046, '#1e293b', true, 'ICE 1001');
+  addWalker('E-2', [{ x: 0.34, y: 0.36 }, { x: 0.48, y: 0.48 }, { x: 0.64, y: 0.60 }], 0.042, '#dc2626', true, 'RE 3');
+  addWalker('E-2', [{ x: 0.48, y: 0.24 }, { x: 0.65, y: 0.38 }, { x: 0.78, y: 0.48 }], 0.049, '#0284c7', true, 'ICE 592');
+  addWalker('E-2', [{ x: 0.66, y: 0.72 }, { x: 0.77, y: 0.62 }, { x: 0.87, y: 0.53 }], 0.050, '#eab308', false, 'U5 Hönow');
+
+  // CUTAWAY: Multi-level cross-section
+  addWalker('CUTAWAY', [{ x: 0.44, y: 0.36 }, { x: 0.56, y: 0.44 }, { x: 0.70, y: 0.53 }], 0.042, '#dc2626', true, 'Bakeral');
+  addWalker('CUTAWAY', [{ x: 0.22, y: 0.62 }, { x: 0.36, y: 0.50 }, { x: 0.46, y: 0.43 }], 0.045, '#0284c7', true, 'ICE 1001');
+  addWalker('CUTAWAY', [{ x: 0.52, y: 0.68 }, { x: 0.66, y: 0.56 }, { x: 0.78, y: 0.46 }], 0.048, '#16a34a', false, 'RE 3');
+
+  return walkers;
 }
 
 export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
-  cameraPreset,
+  activeView,
   renderStyle,
-  timeScale,
-  lightingMode,
+  useAltE0Variant,
+  simSpeed,
   showLabels,
   trainsRef,
   npcsRef,
-  stationClockRef,
-  onTickClock,
+  stationMinutesRef,
+  onSelectView,
 }) => {
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const bgImgRef = useRef<HTMLImageElement | null>(null);
-
-  const propsRef = useRef({
-    cameraPreset,
-    renderStyle,
-    timeScale,
-    lightingMode,
-    showLabels,
-    onTickClock,
+  const imagesRef = useRef<Record<string, HTMLImageElement>>({});
+  const walkersRef = useRef<AmbientWalker[]>(createBlueprintWalkers());
+  const panRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const zoomRef = useRef<number>(1.0);
+  const dragRef = useRef<{ active: boolean; startX: number; startY: number; origX: number; origY: number }>({
+    active: false,
+    startX: 0,
+    startY: 0,
+    origX: 0,
+    origY: 0,
   });
 
+  // Preload all reference images
   useEffect(() => {
-    propsRef.current = {
-      cameraPreset,
-      renderStyle,
-      timeScale,
-      lightingMode,
-      showLabels,
-      onTickClock,
-    };
-  }, [cameraPreset, renderStyle, timeScale, lightingMode, showLabels, onTickClock]);
-
-  useEffect(() => {
-    // Preload the reference architectural illustration for hybrid/reference modes
-    const img = new Image();
-    img.src =
-      '/assets/aistudio/ONE_standalone_full_bleed_isometric_2D_RPG_GAME_MAP_for_Berl_d2dca29c.png';
-    img.onload = () => {
-      bgImgRef.current = img;
-    };
+    const urls = new Set<string>();
+    for (const bp of STATION_BLUEPRINTS) {
+      urls.add(bp.referenceImage);
+      if (bp.altReferenceImage) urls.add(bp.altReferenceImage);
+    }
+    urls.forEach((url) => {
+      if (!imagesRef.current[url]) {
+        const img = new Image();
+        img.src = url;
+        imagesRef.current[url] = img;
+      }
+    });
   }, []);
+
+  // Reset pan/zoom when view changes
+  useEffect(() => {
+    panRef.current = { x: 0, y: 0 };
+    zoomRef.current = 1.0;
+  }, [activeView, renderStyle]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-
+    if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let width = container.clientWidth || 1440;
-    let height = container.clientHeight || 900;
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
-
-    const updateSize = () => {
-      if (!container || !canvas) return;
-      width = container.clientWidth || window.innerWidth;
-      height = container.clientHeight || window.innerHeight;
-      canvas.width = Math.floor(width * dpr);
-      canvas.height = Math.floor(height * dpr);
-    };
-    updateSize();
-
-    const resizeObserver = new ResizeObserver(() => {
-      updateSize();
-    });
-    resizeObserver.observe(container);
-
-    // Camera Pan & Zoom state
-    let camPanX = 0;
-    let camPanY = 0;
-    let camZoom = 1.0;
-    let targetPanX = 0;
-    let targetPanY = 0;
-    let targetZoom = 1.0;
-    let lastPreset: CameraPreset = propsRef.current.cameraPreset;
-
-    let isDragging = false;
-    let dragStartX = 0;
-    let dragStartY = 0;
-
-    const handlePointerDown = (e: PointerEvent) => {
-      isDragging = true;
-      dragStartX = e.clientX;
-      dragStartY = e.clientY;
-    };
-
-    const handlePointerMove = (e: PointerEvent) => {
-      if (!isDragging) return;
-      const dx = e.clientX - dragStartX;
-      const dy = e.clientY - dragStartY;
-      targetPanX = Math.max(-500, Math.min(500, targetPanX + dx));
-      targetPanY = Math.max(-350, Math.min(350, targetPanY + dy));
-      camPanX = targetPanX;
-      camPanY = targetPanY;
-      dragStartX = e.clientX;
-      dragStartY = e.clientY;
-    };
-
-    const handlePointerUp = () => {
-      isDragging = false;
-    };
-
-    const handleWheel = (e: WheelEvent) => {
-      const delta = e.deltaY > 0 ? -0.08 : 0.08;
-      targetZoom = Math.max(0.7, Math.min(2.1, targetZoom + delta));
-    };
-
-    canvas.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    canvas.addEventListener('wheel', handleWheel, { passive: true });
-
+    let timerId: number | null = null;
     let lastTime = performance.now();
-    let lastClockSync = 0;
-    let timerId = 0;
-    let isDisposed = false;
 
-    const scheduleNextFrame = () => {
-      if (isDisposed) return;
-      timerId = window.setTimeout(() => {
-        if (!isDisposed) {
-          renderFrame(performance.now());
-        }
-      }, 32);
+    const handleResize = () => {
+      if (!canvas) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      canvas.width = Math.floor(window.innerWidth * dpr);
+      canvas.height = Math.floor(window.innerHeight * dpr);
     };
 
-    // Isometric Projection matched to the exact angle of the architectural reference artwork!
-    // In the reference artwork:
-    // - Track axis (u): runs from bottom-left to top-right at ~26.5 deg (2:1 isometric)
-    // - Gallery/Bridge axis (v): runs from top-left to bottom-right at ~26.5 deg
-    const TILE_W = 64;
-    const TILE_H = 32;
+    handleResize();
+    window.addEventListener('resize', handleResize);
 
-    const projectIso = (
-      u: number, // Along the main tracks (-16 to +16)
-      v: number, // Across the tracks / along the concourse bridge (-12 to +12)
-      zPx: number, // Vertical elevation in pixels (positive = up)
+    // Draw the exact 2:1 isometric slate-grey engineering grid from the reference images
+    const drawIsometricEngineeringGrid = (
+      c: CanvasRenderingContext2D,
+      w: number,
+      h: number,
+      tileW: number = 36
+    ) => {
+      c.fillStyle = '#3b4049';
+      c.fillRect(0, 0, w, h);
+
+      const tileH = tileW * 0.5;
+      c.strokeStyle = '#2e323b';
+      c.lineWidth = 1;
+      c.beginPath();
+
+      const diagSpan = Math.ceil((w + h * 2) / tileW) + 8;
+      for (let i = -diagSpan; i <= diagSpan; i++) {
+        // NW -> SE lines (slope +0.5)
+        const startX1 = i * tileW;
+        c.moveTo(startX1, 0);
+        c.lineTo(startX1 + h * 2, h);
+
+        // NE -> SW lines (slope -0.5)
+        const startX2 = i * tileW;
+        c.moveTo(startX2, 0);
+        c.lineTo(startX2 - h * 2, h);
+      }
+      c.stroke();
+    };
+
+    // Draw an isometric prism block (used in procedural architecture mode & live vehicles)
+    const drawIsoBox = (
+      c: CanvasRenderingContext2D,
       cx: number,
       cy: number,
-      zoom: number
+      wIso: number,
+      dIso: number,
+      hPx: number,
+      topColor: string,
+      leftColor: string,
+      rightColor: string,
+      strokeColor: string = '#1e2229'
     ) => {
-      const sx = cx + (u + v) * (TILE_W * 0.5) * zoom;
-      const sy = cy + (v - u) * (TILE_H * 0.5) * zoom - zPx * zoom;
-      return { sx, sy };
+      // 4 top corners in isometric screen space
+      const pTop = { x: cx, y: cy - hPx };
+      const pRight = { x: cx + wIso, y: cy + wIso * 0.5 - hPx };
+      const pBottom = { x: cx + wIso - dIso, y: cy + (wIso + dIso) * 0.5 - hPx };
+      const pLeft = { x: cx - dIso, y: cy + dIso * 0.5 - hPx };
+
+      // Left face
+      c.fillStyle = leftColor;
+      c.beginPath();
+      c.moveTo(pLeft.x, pLeft.y);
+      c.lineTo(pBottom.x, pBottom.y);
+      c.lineTo(pBottom.x, pBottom.y + hPx);
+      c.lineTo(pLeft.x, pLeft.y + hPx);
+      c.closePath();
+      c.fill();
+      c.strokeStyle = strokeColor;
+      c.lineWidth = 1;
+      c.stroke();
+
+      // Right face
+      c.fillStyle = rightColor;
+      c.beginPath();
+      c.moveTo(pBottom.x, pBottom.y);
+      c.lineTo(pRight.x, pRight.y);
+      c.lineTo(pRight.x, pRight.y + hPx);
+      c.lineTo(pBottom.x, pBottom.y + hPx);
+      c.closePath();
+      c.fill();
+      c.stroke();
+
+      // Top face
+      c.fillStyle = topColor;
+      c.beginPath();
+      c.moveTo(pTop.x, pTop.y);
+      c.lineTo(pRight.x, pRight.y);
+      c.lineTo(pBottom.x, pBottom.y);
+      c.lineTo(pLeft.x, pLeft.y);
+      c.closePath();
+      c.fill();
+      c.stroke();
     };
 
-    // Draw an isometric 3D quad given 4 (u, v, zPx) vertices
-    const fillIsoPoly = (
-      pts: Array<{ u: number; v: number; z: number }>,
+    // Draw a circular cylinder in isometric space (for the iconic red DB Info Rondells & Revolving Doors)
+    const drawIsoCylinder = (
+      c: CanvasRenderingContext2D,
       cx: number,
       cy: number,
-      zoom: number,
-      fill: string | CanvasGradient,
-      stroke?: string,
-      lineWidth: number = 1
+      rx: number,
+      ry: number,
+      hPx: number,
+      topColor: string,
+      bodyColor: string,
+      bandColor?: string,
+      label?: string
     ) => {
-      if (pts.length === 0) return;
-      ctx.beginPath();
-      const first = projectIso(pts[0].u, pts[0].v, pts[0].z, cx, cy, zoom);
-      ctx.moveTo(first.sx, first.sy);
-      for (let i = 1; i < pts.length; i++) {
-        const p = projectIso(pts[i].u, pts[i].v, pts[i].z, cx, cy, zoom);
-        ctx.lineTo(p.sx, p.sy);
+      // Shadow
+      c.fillStyle = 'rgba(0,0,0,0.28)';
+      c.beginPath();
+      c.ellipse(cx + 3, cy + 4, rx * 1.04, ry * 1.04, 0, 0, Math.PI * 2);
+      c.fill();
+
+      // Cylinder body
+      c.fillStyle = bodyColor;
+      c.beginPath();
+      c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI);
+      c.lineTo(cx - rx, cy - hPx);
+      c.ellipse(cx, cy - hPx, rx, ry, 0, Math.PI, 0, true);
+      c.closePath();
+      c.fill();
+      c.strokeStyle = '#1e2229';
+      c.lineWidth = 1.2;
+      c.stroke();
+
+      // Optional mid window/stripe band
+      if (bandColor) {
+        c.fillStyle = bandColor;
+        c.beginPath();
+        c.ellipse(cx, cy - hPx * 0.35, rx * 0.99, ry * 0.99, 0, 0, Math.PI);
+        c.lineTo(cx - rx * 0.99, cy - hPx * 0.72);
+        c.ellipse(cx, cy - hPx * 0.72, rx * 0.99, ry * 0.99, 0, Math.PI, 0, true);
+        c.closePath();
+        c.fill();
       }
-      ctx.closePath();
-      ctx.fillStyle = fill;
-      ctx.fill();
-      if (stroke) {
-        ctx.strokeStyle = stroke;
-        ctx.lineWidth = lineWidth * zoom;
-        ctx.stroke();
+
+      // Cylinder roof
+      c.fillStyle = topColor;
+      c.beginPath();
+      c.ellipse(cx, cy - hPx, rx * 1.05, ry * 1.05, 0, 0, Math.PI * 2);
+      c.fill();
+      c.stroke();
+
+      if (label) {
+        c.fillStyle = '#ffffff';
+        c.font = 'bold 9px sans-serif';
+        c.textAlign = 'center';
+        c.fillText(label, cx, cy - hPx + 3);
       }
     };
 
-    // Draw a shaded 3D isometric prism block aligned with (u, v, z)
-    const drawPrism = (
-      u1: number,
-      u2: number,
-      v1: number,
-      v2: number,
-      zBase: number,
-      zTop: number,
-      cx: number,
-      cy: number,
-      zoom: number,
-      topFill: string | CanvasGradient,
-      frontLeftFill: string | CanvasGradient, // Face at u = u1 (facing bottom-left)
-      frontRightFill: string | CanvasGradient, // Face at v = v2 (facing bottom-right)
-      stroke: string = 'rgba(20, 24, 33, 0.65)',
-      lineWidth: number = 1
+    // Draw an animated isometric train or vehicle along a screen-space vector
+    const drawLiveIsoTrain = (
+      c: CanvasRenderingContext2D,
+      x1: number,
+      y1: number,
+      x2: number,
+      y2: number,
+      thickness: number,
+      height: number,
+      style: 'ICE' | 'REGIO' | 'UBAHN_U5' | 'BVG_BUS' | 'TAXI',
+      label: string,
+      nowSec: number
     ) => {
-      // Front-left face (u = u1, v from v1 to v2)
-      fillIsoPoly(
-        [
-          { u: u1, v: v1, z: zBase },
-          { u: u1, v: v2, z: zBase },
-          { u: u1, v: v2, z: zTop },
-          { u: u1, v: v1, z: zTop },
-        ],
-        cx,
-        cy,
-        zoom,
-        frontLeftFill,
-        stroke,
-        lineWidth
-      );
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      if (len < 4) return;
 
-      // Front-right face (v = v2, u from u1 to u2)
-      fillIsoPoly(
-        [
-          { u: u1, v: v2, z: zBase },
-          { u: u2, v: v2, z: zBase },
-          { u: u2, v: v2, z: zTop },
-          { u: u1, v: v2, z: zTop },
-        ],
-        cx,
-        cy,
-        zoom,
-        frontRightFill,
-        stroke,
-        lineWidth
-      );
+      // Normal vector pointing "up-right" in screen space for isometric thickness
+      const nx = -dy / len;
+      const ny = dx / len;
+      const wx = nx * thickness;
+      const wy = ny * thickness * 0.65;
 
-      // Top face (z = zTop)
-      fillIsoPoly(
-        [
-          { u: u1, v: v1, z: zTop },
-          { u: u2, v: v1, z: zTop },
-          { u: u2, v: v2, z: zTop },
-          { u: u1, v: v2, z: zTop },
-        ],
-        cx,
-        cy,
-        zoom,
-        topFill,
-        stroke,
-        lineWidth
-      );
-    };
+      let bodyFill = '#f1f5f9';
+      let roofFill = '#e2e8f0';
+      let stripeFill = '#dc2626';
+      let windowFill = '#1e293b';
 
-    // Realistic Railway Track Renderer (Ballast, Concrete Sleepers, Dual Steel Rails, Specular Shine)
-    const drawRealisticTrack = (
-      vCenter: number,
-      uStart: number,
-      uEnd: number,
-      zLevel: number,
-      cx: number,
-      cy: number,
-      zoom: number
-    ) => {
-      // 1. Crushed granite ballast bed
-      fillIsoPoly(
-        [
-          { u: uStart, v: vCenter - 0.85, z: zLevel },
-          { u: uEnd, v: vCenter - 0.85, z: zLevel },
-          { u: uEnd, v: vCenter + 0.85, z: zLevel },
-          { u: uStart, v: vCenter + 0.85, z: zLevel },
-        ],
-        cx,
-        cy,
-        zoom,
-        '#3d3834',
-        '#26221f',
-        0.8
-      );
-
-      // Inner dark trackbed shadow trough
-      fillIsoPoly(
-        [
-          { u: uStart, v: vCenter - 0.52, z: zLevel },
-          { u: uEnd, v: vCenter - 0.52, z: zLevel },
-          { u: uEnd, v: vCenter + 0.52, z: zLevel },
-          { u: uStart, v: vCenter + 0.52, z: zLevel },
-        ],
-        cx,
-        cy,
-        zoom,
-        '#292524'
-      );
-
-      // 2. Concrete / Timber Cross-Sleepers (Bahnschwellen)
-      ctx.strokeStyle = '#57534e';
-      ctx.lineWidth = 2.6 * zoom;
-      for (let u = uStart + 0.3; u <= uEnd - 0.3; u += 0.55) {
-        const p1 = projectIso(u, vCenter - 0.62, zLevel + 1, cx, cy, zoom);
-        const p2 = projectIso(u, vCenter + 0.62, zLevel + 1, cx, cy, zoom);
-        ctx.beginPath();
-        ctx.moveTo(p1.sx, p1.sy);
-        ctx.lineTo(p2.sx, p2.sy);
-        ctx.stroke();
+      if (style === 'REGIO') {
+        bodyFill = '#c83e3b';
+        roofFill = '#94a3b8';
+        stripeFill = '#f8fafc';
+      } else if (style === 'UBAHN_U5') {
+        bodyFill = '#eab308';
+        roofFill = '#ca8a04';
+        stripeFill = '#1e293b';
+      } else if (style === 'BVG_BUS') {
+        bodyFill = '#facc15';
+        roofFill = '#fef08a';
+        stripeFill = '#334155';
+      } else if (style === 'TAXI') {
+        bodyFill = '#fde047';
+        roofFill = '#facc15';
+        stripeFill = '#1e293b';
       }
 
-      // 3. Dual Steel Rails with Specular Highlight
-      const railOffsets = [-0.34, 0.34];
-      for (const ro of railOffsets) {
-        const rStart = projectIso(uStart, vCenter + ro, zLevel + 2.5, cx, cy, zoom);
-        const rEnd = projectIso(uEnd, vCenter + ro, zLevel + 2.5, cx, cy, zoom);
+      // Drop shadow
+      c.fillStyle = 'rgba(0, 0, 0, 0.32)';
+      c.beginPath();
+      c.moveTo(x1 + 3, y1 + 5);
+      c.lineTo(x2 + 3, y2 + 5);
+      c.lineTo(x2 + wx + 3, y2 + wy + 5);
+      c.lineTo(x1 + wx + 3, y1 + wy + 5);
+      c.closePath();
+      c.fill();
 
-        // Dark rail base web
-        ctx.strokeStyle = '#1c1917';
-        ctx.lineWidth = 3.2 * zoom;
-        ctx.beginPath();
-        ctx.moveTo(rStart.sx, rStart.sy + 1 * zoom);
-        ctx.lineTo(rEnd.sx, rEnd.sy + 1 * zoom);
-        ctx.stroke();
+      // Side face
+      c.fillStyle = bodyFill;
+      c.beginPath();
+      c.moveTo(x1, y1);
+      c.lineTo(x2, y2);
+      c.lineTo(x2, y2 - height);
+      c.lineTo(x1, y1 - height);
+      c.closePath();
+      c.fill();
+      c.strokeStyle = '#1e2229';
+      c.lineWidth = 1.2;
+      c.stroke();
 
-        // Polished steel rail head
-        ctx.strokeStyle = '#d6d3d1';
-        ctx.lineWidth = 1.6 * zoom;
-        ctx.beginPath();
-        ctx.moveTo(rStart.sx, rStart.sy);
-        ctx.lineTo(rEnd.sx, rEnd.sy);
-        ctx.stroke();
-      }
-    };
+      // Stripe along side face
+      c.fillStyle = stripeFill;
+      c.beginPath();
+      c.moveTo(x1, y1 - height * 0.32);
+      c.lineTo(x2, y2 - height * 0.32);
+      c.lineTo(x2, y2 - height * 0.48);
+      c.lineTo(x1, y1 - height * 0.48);
+      c.closePath();
+      c.fill();
 
-    // Realistic Island Platform Renderer (Stone Tile Grid, Yellow Tactile Line, Benches, Light Posts, ZZA, Poster Lightboxes)
-    const drawRealisticPlatform = (
-      v1: number,
-      v2: number,
-      uStart: number,
-      uEnd: number,
-      zBase: number,
-      cx: number,
-      cy: number,
-      zoom: number,
-      platformTitle: string,
-      hasPoster: boolean
-    ) => {
-      const zTop = zBase + 16;
+      // Windows along side face
+      const segments = style === 'TAXI' ? 2 : style === 'BVG_BUS' ? 4 : 8;
+      for (let i = 0; i < segments; i++) {
+        const tA = (i + 0.18) / segments;
+        const tB = (i + 0.78) / segments;
+        const sxA = x1 + dx * tA;
+        const syA = y1 + dy * tA;
+        const sxB = x1 + dx * tB;
+        const syB = y1 + dy * tB;
 
-      // Platform structural slab with warm limestone top
-      drawPrism(
-        uStart,
-        uEnd,
-        v1,
-        v2,
-        zBase,
-        zTop,
-        cx,
-        cy,
-        zoom,
-        '#d6d1c7',
-        '#8c857B',
-        '#6e685f',
-        '#292524',
-        1.1
-      );
-
-      // Transverse stone tile joint lines across platform surface
-      ctx.strokeStyle = 'rgba(68, 64, 60, 0.25)';
-      ctx.lineWidth = 0.8 * zoom;
-      for (let u = uStart + 1; u < uEnd; u += 1.2) {
-        const p1 = projectIso(u, v1, zTop, cx, cy, zoom);
-        const p2 = projectIso(u, v2, zTop, cx, cy, zoom);
-        ctx.beginPath();
-        ctx.moveTo(p1.sx, p1.sy);
-        ctx.lineTo(p2.sx, p2.sy);
-        ctx.stroke();
+        c.fillStyle = i % 2 === 0 ? windowFill : '#334155';
+        c.beginPath();
+        c.moveTo(sxA, syA - height * 0.52);
+        c.lineTo(sxB, syB - height * 0.52);
+        c.lineTo(sxB, syB - height * 0.82);
+        c.lineTo(sxA, syA - height * 0.82);
+        c.closePath();
+        c.fill();
       }
 
-      // Yellow Tactile Safety Strips (Blindenleitstreifen) along both edges
-      fillIsoPoly(
-        [
-          { u: uStart + 0.3, v: v1 + 0.16, z: zTop + 0.4 },
-          { u: uEnd - 0.3, v: v1 + 0.16, z: zTop + 0.4 },
-          { u: uEnd - 0.3, v: v1 + 0.28, z: zTop + 0.4 },
-          { u: uStart + 0.3, v: v1 + 0.28, z: zTop + 0.4 },
-        ],
-        cx,
-        cy,
-        zoom,
-        '#eab308'
-      );
-      fillIsoPoly(
-        [
-          { u: uStart + 0.3, v: v2 - 0.28, z: zTop + 0.4 },
-          { u: uEnd - 0.3, v: v2 - 0.28, z: zTop + 0.4 },
-          { u: uEnd - 0.3, v: v2 - 0.16, z: zTop + 0.4 },
-          { u: uStart + 0.3, v: v2 - 0.16, z: zTop + 0.4 },
-        ],
-        cx,
-        cy,
-        zoom,
-        '#eab308'
-      );
+      // Front nose face
+      c.fillStyle = bodyFill;
+      c.beginPath();
+      c.moveTo(x1, y1);
+      c.lineTo(x1 + wx, y1 + wy);
+      c.lineTo(x1 + wx, y1 + wy - height);
+      c.lineTo(x1, y1 - height);
+      c.closePath();
+      c.fill();
+      c.stroke();
 
-      const vMid = (v1 + v2) * 0.5;
+      // Windshield on front face
+      c.fillStyle = '#0f172a';
+      c.beginPath();
+      c.moveTo(x1 + wx * 0.15, y1 + wy * 0.15 - height * 0.48);
+      c.lineTo(x1 + wx * 0.85, y1 + wy * 0.85 - height * 0.48);
+      c.lineTo(x1 + wx * 0.85, y1 + wy * 0.85 - height * 0.84);
+      c.lineTo(x1 + wx * 0.15, y1 + wy * 0.15 - height * 0.84);
+      c.closePath();
+      c.fill();
 
-      // Warm Golden Platform Light Pools & Lamp Posts
-      const lampPositions = [uStart + 3.2, (uStart + uEnd) * 0.5, uEnd - 3.2];
-      for (const lu of lampPositions) {
-        const floorPt = projectIso(lu, vMid, zTop, cx, cy, zoom);
-        const topPt = projectIso(lu, vMid, zTop + 42, cx, cy, zoom);
+      // Warm glowing headlights
+      const glow = 0.65 + 0.35 * Math.sin(nowSec * 5);
+      c.fillStyle = `rgba(254, 240, 138, ${glow})`;
+      c.beginPath();
+      c.arc(x1 + wx * 0.25, y1 + wy * 0.25 - height * 0.24, 2.5, 0, Math.PI * 2);
+      c.arc(x1 + wx * 0.75, y1 + wy * 0.75 - height * 0.24, 2.5, 0, Math.PI * 2);
+      c.fill();
 
-        // Warm floor illumination pool
-        const pool = ctx.createRadialGradient(
-          floorPt.sx,
-          floorPt.sy,
-          2 * zoom,
-          floorPt.sx,
-          floorPt.sy,
-          44 * zoom
-        );
-        pool.addColorStop(0, 'rgba(254, 240, 138, 0.42)');
-        pool.addColorStop(0.55, 'rgba(245, 158, 11, 0.16)');
-        pool.addColorStop(1, 'rgba(245, 158, 11, 0)');
-        ctx.fillStyle = pool;
-        ctx.beginPath();
-        ctx.ellipse(floorPt.sx, floorPt.sy, 44 * zoom, 22 * zoom, 0, 0, Math.PI * 2);
-        ctx.fill();
+      // Roof face
+      c.fillStyle = roofFill;
+      c.beginPath();
+      c.moveTo(x1, y1 - height);
+      c.lineTo(x2, y2 - height);
+      c.lineTo(x2 + wx, y2 + wy - height);
+      c.lineTo(x1 + wx, y1 + wy - height);
+      c.closePath();
+      c.fill();
+      c.stroke();
 
-        // Lamp pole
-        ctx.strokeStyle = '#334155';
-        ctx.lineWidth = 2.2 * zoom;
-        ctx.beginPath();
-        ctx.moveTo(floorPt.sx, floorPt.sy);
-        ctx.lineTo(topPt.sx, topPt.sy);
-        ctx.stroke();
-
-        // T-bar lamp head
-        ctx.strokeStyle = '#fef08a';
-        ctx.lineWidth = 3 * zoom;
-        ctx.beginPath();
-        ctx.moveTo(topPt.sx - 8 * zoom, topPt.sy - 3 * zoom);
-        ctx.lineTo(topPt.sx + 8 * zoom, topPt.sy + 3 * zoom);
-        ctx.stroke();
-      }
-
-      // Wooden Platform Waiting Benches
-      for (const bu of [uStart + 4.8, uEnd - 5.2]) {
-        drawPrism(
-          bu - 0.6,
-          bu + 0.6,
-          vMid - 0.25,
-          vMid + 0.25,
-          zTop,
-          zTop + 9,
-          cx,
-          cy,
-          zoom,
-          '#b45309',
-          '#78350f',
-          '#451a03',
-          '#1c1917',
-          0.8
-        );
-      }
-
-      // Illuminated Fernsehturm Poster Display (matching bottom-left of reference artwork!)
-      if (hasPoster) {
-        const pu = uStart + 2.3;
-        drawPrism(
-          pu - 0.15,
-          pu + 0.15,
-          vMid - 0.45,
-          vMid + 0.45,
-          zTop,
-          zTop + 48,
-          cx,
-          cy,
-          zoom,
-          '#475569',
-          '#fde68a',
-          '#334155',
-          '#1e293b',
-          1.2
-        );
-        // Poster warm glow
-        const pCenter = projectIso(pu, vMid, zTop + 24, cx, cy, zoom);
-        const pGlow = ctx.createRadialGradient(
-          pCenter.sx,
-          pCenter.sy,
-          2,
-          pCenter.sx,
-          pCenter.sy,
-          28 * zoom
-        );
-        pGlow.addColorStop(0, 'rgba(253, 224, 71, 0.55)');
-        pGlow.addColorStop(1, 'rgba(253, 224, 71, 0)');
-        ctx.fillStyle = pGlow;
-        ctx.beginPath();
-        ctx.arc(pCenter.sx, pCenter.sy, 28 * zoom, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Blue Split-Flap Departure Board (Zugzielanzeiger) on Platform
-      const boardU = uStart + 6.4;
-      drawPrism(
-        boardU - 0.9,
-        boardU + 0.9,
-        vMid - 0.12,
-        vMid + 0.12,
-        zTop + 22,
-        zTop + 48,
-        cx,
-        cy,
-        zoom,
-        '#334155',
-        '#1e3a8a',
-        '#1d4ed8',
-        '#0f172a',
-        1.1
-      );
-      if (propsRef.current.showLabels) {
-        const bPt = projectIso(boardU, vMid, zTop + 53, cx, cy, zoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(9.5 * zoom)}px "JetBrains Mono", monospace`;
-        ctx.fillStyle = '#e2e8f0';
-        ctx.textAlign = 'center';
-        ctx.fillText(platformTitle, bPt.sx, bPt.sy);
-        ctx.restore();
+      // Label badge if enabled
+      if (showLabels && label) {
+        const midX = (x1 + x2) * 0.5 + wx * 0.5;
+        const midY = (y1 + y2) * 0.5 + wy * 0.5 - height - 8;
+        c.font = 'bold 10px monospace';
+        const tw = c.measureText(label).width + 10;
+        c.fillStyle = 'rgba(15, 23, 42, 0.86)';
+        c.fillRect(midX - tw * 0.5, midY - 9, tw, 14);
+        c.strokeStyle =
+          style === 'UBAHN_U5' || style === 'BVG_BUS' || style === 'TAXI'
+            ? '#facc15'
+            : style === 'REGIO'
+              ? '#ef4444'
+              : '#38bdf8';
+        c.lineWidth = 1;
+        c.strokeRect(midX - tw * 0.5, midY - 9, tw, 14);
+        c.fillStyle = '#f8fafc';
+        c.textAlign = 'center';
+        c.fillText(label, midX, midY + 1);
       }
     };
 
-    // Ultra-Detailed Realistic Train Renderer (ICE 3/4 High-Speed & DB Regio / S-Bahn)
-    const drawRealisticTrain = (
-      vCenter: number,
-      uPos: number, // Center of train along track
-      zBase: number,
-      category: 'ICE' | 'REGIO' | 'SBAHN' | 'FEX',
-      lineCode: string,
-      destination: string,
-      isBoarding: boolean,
-      cx: number,
-      cy: number,
-      zoom: number
-    ) => {
-      const numCars = 2;
-      const carLen = 5.4;
-      const gap = 0.25;
-      const halfTotal = (numCars * carLen + (numCars - 1) * gap) * 0.5;
-      const v1 = vCenter - 0.62;
-      const v2 = vCenter + 0.62;
-      const zBodyBot = zBase + 5;
-      const zBodyTop = zBase + 34;
-
-      const isIce = category === 'ICE';
-
-      // Dark underbody bogie shadow
-      fillIsoPoly(
-        [
-          { u: uPos - halfTotal - 0.8, v: v1 + 0.08, z: zBase + 2 },
-          { u: uPos + halfTotal + 0.8, v: v1 + 0.08, z: zBase + 2 },
-          { u: uPos + halfTotal + 0.8, v: v2 - 0.08, z: zBase + 2 },
-          { u: uPos - halfTotal - 0.8, v: v2 - 0.08, z: zBase + 2 },
-        ],
-        cx,
-        cy,
-        zoom,
-        'rgba(10, 12, 16, 0.82)'
-      );
-
-      for (let c = 0; c < numCars; c++) {
-        const cu1 = uPos - halfTotal + c * (carLen + gap);
-        const cu2 = cu1 + carLen;
-
-        // Main carriage body
-        const topColor = isIce ? '#e7e5e4' : '#b91c1c';
-        const leftColor = isIce ? '#d6d3d1' : '#991b1b';
-        const rightColor = isIce ? '#f5f5f4' : '#dc2626';
-
-        drawPrism(
-          cu1,
-          cu2,
-          v1,
-          v2,
-          zBodyBot,
-          zBodyTop,
-          cx,
-          cy,
-          zoom,
-          topColor,
-          leftColor,
-          rightColor,
-          '#1c1917',
-          1.1
-        );
-
-        // If ICE: Iconic DB Traffic-Red Longitudinal Speed Stripe along side (v = v2)
-        if (isIce) {
-          fillIsoPoly(
-            [
-              { u: cu1, v: v2 + 0.01, z: zBodyBot + 7 },
-              { u: cu2, v: v2 + 0.01, z: zBodyBot + 7 },
-              { u: cu2, v: v2 + 0.01, z: zBodyBot + 11.5 },
-              { u: cu1, v: v2 + 0.01, z: zBodyBot + 11.5 },
-            ],
-            cx,
-            cy,
-            zoom,
-            '#dc2626'
-          );
-          // Continuous dark tinted passenger window ribbon
-          fillIsoPoly(
-            [
-              { u: cu1 + 0.35, v: v2 + 0.01, z: zBodyBot + 15 },
-              { u: cu2 - 0.35, v: v2 + 0.01, z: zBodyBot + 15 },
-              { u: cu2 - 0.35, v: v2 + 0.01, z: zBodyBot + 23 },
-              { u: cu1 + 0.35, v: v2 + 0.01, z: zBodyBot + 23 },
-            ],
-            cx,
-            cy,
-            zoom,
-            '#1e293b',
-            '#475569',
-            0.6
-          );
-        } else {
-          // DB Regio / S-Bahn: Light grey lower skirt + individual warm-lit passenger windows & twin doors
-          fillIsoPoly(
-            [
-              { u: cu1, v: v2 + 0.01, z: zBodyBot },
-              { u: cu2, v: v2 + 0.01, z: zBodyBot },
-              { u: cu2, v: v2 + 0.01, z: zBodyBot + 5 },
-              { u: cu1, v: v2 + 0.01, z: zBodyBot + 5 },
-            ],
-            cx,
-            cy,
-            zoom,
-            '#d6d3d1'
-          );
-
-          // Individual windows & sliding doors along side
-          for (let wu = cu1 + 0.45; wu < cu2 - 0.55; wu += 0.85) {
-            const isDoor = Math.abs(wu - (cu1 + 1.3)) < 0.3 || Math.abs(wu - (cu2 - 1.4)) < 0.3;
-            fillIsoPoly(
-              [
-                { u: wu, v: v2 + 0.02, z: isDoor ? zBodyBot + 4 : zBodyBot + 13 },
-                { u: wu + 0.55, v: v2 + 0.02, z: isDoor ? zBodyBot + 4 : zBodyBot + 13 },
-                { u: wu + 0.55, v: v2 + 0.02, z: zBodyBot + 24 },
-                { u: wu, v: v2 + 0.02, z: zBodyBot + 24 },
-              ],
-              cx,
-              cy,
-              zoom,
-              isDoor
-                ? isBoarding
-                  ? '#fde68a'
-                  : '#94a3b8'
-                : '#1e293b',
-              '#0f172a',
-              0.7
-            );
-          }
-
-          // Roof AC cooling units
-          drawPrism(
-            cu1 + 1.2,
-            cu2 - 1.2,
-            v1 + 0.25,
-            v2 - 0.25,
-            zBodyTop,
-            zBodyTop + 4,
-            cx,
-            cy,
-            zoom,
-            '#78716c',
-            '#57534e',
-            '#44403c',
-            '#1c1917',
-            0.7
-          );
-        }
-
-        // Roof Pantograph (Stromabnehmer) on second car
-        if (c === 1) {
-          const pu = (cu1 + cu2) * 0.5;
-          const pBase = projectIso(pu, vCenter, zBodyTop + 3, cx, cy, zoom);
-          ctx.save();
-          ctx.strokeStyle = '#94a3b8';
-          ctx.lineWidth = 1.6 * zoom;
-          ctx.beginPath();
-          ctx.moveTo(pBase.sx, pBase.sy);
-          ctx.lineTo(pBase.sx - 12 * zoom, pBase.sy - 9 * zoom);
-          ctx.lineTo(pBase.sx, pBase.sy - 18 * zoom);
-          ctx.lineTo(pBase.sx + 12 * zoom, pBase.sy - 9 * zoom);
-          ctx.closePath();
-          ctx.stroke();
-          ctx.restore();
-        }
-      }
-
-      // Sculpted Aerodynamic Front Nose Cone at u = uPos - halfTotal (pointing bottom-left just like reference art!)
-      const noseU1 = uPos - halfTotal - (isIce ? 1.85 : 0.75);
-      const noseU2 = uPos - halfTotal;
-
-      // Tapered aerodynamic wedge
-      fillIsoPoly(
-        [
-          { u: noseU1, v: v1 + 0.15, z: zBodyBot + 2 },
-          { u: noseU1, v: v2 - 0.15, z: zBodyBot + 2 },
-          { u: noseU2, v: v2, z: zBodyTop },
-          { u: noseU2, v: v1, z: zBodyTop },
-        ],
-        cx,
-        cy,
-        zoom,
-        isIce ? '#f5f5f4' : '#dc2626',
-        '#1c1917',
-        1.1
-      );
-
-      // Side of nose cone
-      fillIsoPoly(
-        [
-          { u: noseU1, v: v2 - 0.15, z: zBodyBot + 2 },
-          { u: noseU2, v: v2, z: zBodyBot },
-          { u: noseU2, v: v2, z: zBodyTop },
-        ],
-        cx,
-        cy,
-        zoom,
-        isIce ? '#e7e5e4' : '#b91c1c',
-        '#1c1917',
-        1.0
-      );
-
-      // Dark panoramic driver cockpit windshield on nose slope
-      fillIsoPoly(
-        [
-          { u: noseU1 + 0.45, v: v1 + 0.22, z: zBodyBot + 11 },
-          { u: noseU1 + 0.45, v: v2 - 0.22, z: zBodyBot + 11 },
-          { u: noseU2 - 0.15, v: v2 - 0.12, z: zBodyTop - 3 },
-          { u: noseU2 - 0.15, v: v1 + 0.12, z: zBodyTop - 3 },
-        ],
-        cx,
-        cy,
-        zoom,
-        '#0f172a',
-        '#475569',
-        0.9
-      );
-
-      // Glowing Dual Headlights at nose tip
-      for (const hv of [v1 + 0.28, v2 - 0.28]) {
-        const hl = projectIso(noseU1 + 0.15, hv, zBodyBot + 6, cx, cy, zoom);
-        const hGlow = ctx.createRadialGradient(hl.sx, hl.sy, 1, hl.sx, hl.sy, 18 * zoom);
-        hGlow.addColorStop(0, 'rgba(254, 249, 195, 0.95)');
-        hGlow.addColorStop(0.4, 'rgba(250, 204, 21, 0.35)');
-        hGlow.addColorStop(1, 'rgba(250, 204, 21, 0)');
-        ctx.fillStyle = hGlow;
-        ctx.beginPath();
-        ctx.arc(hl.sx, hl.sy, 18 * zoom, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // Subtle architectural label above train if enabled
-      if (propsRef.current.showLabels) {
-        const lblPt = projectIso(uPos, vCenter, zBodyTop + 18, cx, cy, zoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(9.5 * zoom)}px "JetBrains Mono", monospace`;
-        const txt = `${lineCode} · ${destination}`;
-        const tw = ctx.measureText(txt).width + 10 * zoom;
-        ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
-        ctx.fillRect(lblPt.sx - tw * 0.5, lblPt.sy - 8 * zoom, tw, 15 * zoom);
-        ctx.strokeStyle = isBoarding ? '#34d399' : '#64748b';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(lblPt.sx - tw * 0.5, lblPt.sy - 8 * zoom, tw, 15 * zoom);
-        ctx.fillStyle = isBoarding ? '#6ee7b7' : '#f8fafc';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(txt, lblPt.sx, lblPt.sy - 0.5 * zoom);
-        ctx.restore();
-      }
-    };
-
-    // Detailed Isometric Human Character Renderer
-    const drawRealisticCommuter = (
-      u: number,
-      v: number,
-      z: number,
+    // Draw an animated isometric commuter sprite
+    const drawCommuterSprite = (
+      c: CanvasRenderingContext2D,
+      x: number,
+      y: number,
+      scale: number,
       coatColor: string,
-      trouserColor: string,
-      walkPhase: number,
+      hairColor: string,
       hasSuitcase: boolean,
-      cx: number,
-      cy: number,
-      zoom: number
+      suitcaseColor: string,
+      walkPhase: number,
+      label?: string
     ) => {
-      const pt = projectIso(u, v, z, cx, cy, zoom);
-      const bob = Math.abs(Math.sin(walkPhase)) * 1.8 * zoom;
-      const legSwing = Math.sin(walkPhase) * 2.5 * zoom;
+      const bob = Math.abs(Math.sin(walkPhase)) * 1.8 * scale;
+      const legSwing = Math.sin(walkPhase) * 2.5 * scale;
 
-      ctx.save();
       // Ground shadow
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.36)';
-      ctx.beginPath();
-      ctx.ellipse(pt.sx, pt.sy, 6 * zoom, 3.2 * zoom, 0, 0, Math.PI * 2);
-      ctx.fill();
+      c.fillStyle = 'rgba(0, 0, 0, 0.35)';
+      c.beginPath();
+      c.ellipse(x, y + 1, 4.5 * scale, 2.2 * scale, 0, 0, Math.PI * 2);
+      c.fill();
 
-      // Legs / Trousers
-      ctx.strokeStyle = trouserColor;
-      ctx.lineWidth = 2.4 * zoom;
-      ctx.beginPath();
-      ctx.moveTo(pt.sx - 1.8 * zoom, pt.sy - 8 * zoom);
-      ctx.lineTo(pt.sx - 1.8 * zoom + legSwing, pt.sy);
-      ctx.moveTo(pt.sx + 1.8 * zoom, pt.sy - 8 * zoom);
-      ctx.lineTo(pt.sx + 1.8 * zoom - legSwing, pt.sy);
-      ctx.stroke();
+      // Legs
+      c.strokeStyle = '#0f172a';
+      c.lineWidth = 1.8 * scale;
+      c.beginPath();
+      c.moveTo(x - 1.5 * scale, y - 5 * scale);
+      c.lineTo(x - 1.5 * scale + legSwing, y);
+      c.moveTo(x + 1.5 * scale, y - 5 * scale);
+      c.lineTo(x + 1.5 * scale - legSwing, y);
+      c.stroke();
 
-      // Rolling suitcase beside passenger
+      // Rolling suitcase
       if (hasSuitcase) {
-        ctx.fillStyle = '#334155';
-        ctx.strokeStyle = '#0f172a';
-        ctx.lineWidth = 0.9 * zoom;
-        ctx.fillRect(pt.sx + 5 * zoom, pt.sy - 9 * zoom, 4.5 * zoom, 8 * zoom);
-        ctx.strokeRect(pt.sx + 5 * zoom, pt.sy - 9 * zoom, 4.5 * zoom, 8 * zoom);
+        c.fillStyle = suitcaseColor;
+        c.fillRect(x + 4 * scale, y - 6 * scale, 4.2 * scale, 5.5 * scale);
+        c.strokeStyle = '#0f172a';
+        c.lineWidth = 0.9 * scale;
+        c.strokeRect(x + 4 * scale, y - 6 * scale, 4.2 * scale, 5.5 * scale);
       }
 
-      // Coat / Jacket Torso
-      ctx.fillStyle = coatColor;
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 1 * zoom;
-      ctx.beginPath();
-      ctx.roundRect(
-        pt.sx - 4.2 * zoom,
-        pt.sy - 19 * zoom - bob,
-        8.4 * zoom,
-        11.5 * zoom,
-        2.5 * zoom
-      );
-      ctx.fill();
-      ctx.stroke();
+      // Coat torso
+      c.fillStyle = coatColor;
+      c.beginPath();
+      c.roundRect(x - 3.4 * scale, y - 13 * scale - bob, 6.8 * scale, 8.5 * scale, 2 * scale);
+      c.fill();
+      c.strokeStyle = '#0f172a';
+      c.lineWidth = 0.9 * scale;
+      c.stroke();
 
-      // Head & Hair
-      ctx.fillStyle = '#fed7aa';
-      ctx.beginPath();
-      ctx.arc(pt.sx, pt.sy - 22.5 * zoom - bob, 3.4 * zoom, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+      // Head
+      c.fillStyle = '#fed7aa';
+      c.beginPath();
+      c.arc(x, y - 15.8 * scale - bob, 2.8 * scale, 0, Math.PI * 2);
+      c.fill();
 
-      ctx.fillStyle = '#292524';
-      ctx.beginPath();
-      ctx.arc(pt.sx, pt.sy - 23.8 * zoom - bob, 3.2 * zoom, Math.PI, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      // Hair / cap
+      c.fillStyle = hairColor;
+      c.beginPath();
+      c.arc(x, y - 16.6 * scale - bob, 2.8 * scale, Math.PI, 0);
+      c.fill();
+
+      if (showLabels && label) {
+        c.font = 'bold 9px monospace';
+        const w = c.measureText(label).width + 6;
+        c.fillStyle = 'rgba(15, 23, 42, 0.82)';
+        c.fillRect(x - w * 0.5, y - 28 * scale - bob, w, 11);
+        c.fillStyle = '#e2e8f0';
+        c.textAlign = 'center';
+        c.fillText(label, x, y - 20 * scale - bob);
+      }
+    };
+
+    // Draw live animated overlays calibrated to a reference blueprint rectangle (rx, ry, rw, rh)
+    const drawBlueprintLiveOverlays = (
+      c: CanvasRenderingContext2D,
+      viewId: StationViewId,
+      rx: number,
+      ry: number,
+      rw: number,
+      rh: number,
+      nowSec: number,
+      scaleFactor: number = 1
+    ) => {
+      const px = (nx: number) => rx + nx * rw;
+      const py = (ny: number) => ry + ny * rh;
+
+      // 1. CENTRAL ATRIUM (LICHTHOF) LIVE GLASS ELEVATORS & ESCALATORS
+      if (viewId !== 'CUTAWAY') {
+        const elev1X = px(0.493);
+        const elev1TopY = py(0.39);
+        const elev1BotY = py(0.50);
+        const cabin1T = 0.5 + 0.42 * Math.sin(nowSec * 1.15);
+        const cabin1Y = elev1TopY + (elev1BotY - elev1TopY) * cabin1T;
+
+        const elev2X = px(0.534);
+        const elev2TopY = py(0.50);
+        const elev2BotY = py(0.60);
+        const cabin2T = 0.5 + 0.42 * Math.cos(nowSec * 0.95);
+        const cabin2Y = elev2TopY + (elev2BotY - elev2TopY) * cabin2T;
+
+        for (const [ex, ey] of [
+          [elev1X, cabin1Y],
+          [elev2X, cabin2Y],
+        ]) {
+          c.fillStyle = 'rgba(56, 189, 248, 0.35)';
+          c.fillRect(ex - 11 * scaleFactor, ey - 8 * scaleFactor, 22 * scaleFactor, 16 * scaleFactor);
+          c.strokeStyle = 'rgba(224, 242, 254, 0.9)';
+          c.lineWidth = 1.3 * scaleFactor;
+          c.strokeRect(ex - 11 * scaleFactor, ey - 8 * scaleFactor, 22 * scaleFactor, 16 * scaleFactor);
+
+          // Glowing cabin ceiling light
+          c.fillStyle = 'rgba(254, 249, 195, 0.9)';
+          c.fillRect(ex - 7 * scaleFactor, ey - 6 * scaleFactor, 14 * scaleFactor, 3 * scaleFactor);
+        }
+
+        // Animated Escalator step highlights in the Atrium pit
+        const escSteps = 6;
+        for (let s = 0; s < escSteps; s++) {
+          const t = ((s / escSteps) + nowSec * 0.35) % 1;
+          const sx1 = px(0.415 + t * 0.045);
+          const sy1 = py(0.415 + t * 0.068);
+          c.fillStyle = 'rgba(250, 204, 21, 0.65)';
+          c.fillRect(sx1 - 3 * scaleFactor, sy1 - 1 * scaleFactor, 6 * scaleFactor, 2 * scaleFactor);
+
+          const sx2 = px(0.635 - t * 0.042);
+          const sy2 = py(0.545 + t * 0.065);
+          c.fillRect(sx2 - 3 * scaleFactor, sy2 - 1 * scaleFactor, 6 * scaleFactor, 2 * scaleFactor);
+        }
+      } else {
+        // CUTAWAY view twin glass elevators
+        const elevLeftX = px(0.44);
+        const cabinLeftY = py(0.18 + (0.5 + 0.45 * Math.sin(nowSec * 1.1)) * 0.22);
+        const elevRightX = px(0.608);
+        const cabinRightY = py(0.26 + (0.5 + 0.45 * Math.cos(nowSec * 0.95)) * 0.20);
+
+        for (const [ex, ey] of [
+          [elevLeftX, cabinLeftY],
+          [elevRightX, cabinRightY],
+        ]) {
+          c.fillStyle = 'rgba(56, 189, 248, 0.35)';
+          c.fillRect(ex - 13 * scaleFactor, ey - 9 * scaleFactor, 26 * scaleFactor, 18 * scaleFactor);
+          c.strokeStyle = 'rgba(224, 242, 254, 0.85)';
+          c.lineWidth = 1.4 * scaleFactor;
+          c.strokeRect(ex - 13 * scaleFactor, ey - 9 * scaleFactor, 26 * scaleFactor, 18 * scaleFactor);
+        }
+      }
+
+      // 2. LEVEL-SPECIFIC LIVE VEHICLES, TRAINS & ARCHITECTURAL LIGHTS
+      if (viewId === 'E+2') {
+        // Animated shuttle train gliding along the upper East-West track (SW -> NE)
+        const tIce = ((nowSec * 0.07) % 1.3) - 0.15;
+        if (tIce >= 0 && tIce <= 1) {
+          const startX = px(0.10 + tIce * 0.36);
+          const startY = py(0.56 - tIce * 0.25);
+          const endX = startX + 86 * scaleFactor;
+          const endY = startY - 54 * scaleFactor;
+          drawLiveIsoTrain(
+            c,
+            startX,
+            startY,
+            endX,
+            endY,
+            15 * scaleFactor,
+            14 * scaleFactor,
+            'ICE',
+            'ICE 948 → Köln Hbf',
+            nowSec
+          );
+        }
+
+        // Live destination badges on the upper tracks
+        if (showLabels) {
+          for (const [bx, by, txt, col] of [
+            [0.24, 0.38, 'ICE 1001 · Gl. 11', '#38bdf8'],
+            [0.26, 0.67, 'RE 1 · S7 Stadtbahn · Gl. 15', '#ef4444'],
+          ] as const) {
+            const lx = px(bx);
+            const ly = py(by);
+            c.font = `bold ${Math.max(9, Math.round(10 * scaleFactor))}px monospace`;
+            const tw = c.measureText(txt).width + 12;
+            c.fillStyle = 'rgba(15, 23, 42, 0.88)';
+            c.fillRect(lx - tw * 0.5, ly - 10, tw, 16);
+            c.strokeStyle = col;
+            c.lineWidth = 1.2;
+            c.strokeRect(lx - tw * 0.5, ly - 10, tw, 16);
+            c.fillStyle = '#f8fafc';
+            c.textAlign = 'center';
+            c.fillText(txt, lx, ly + 2);
+          }
+        }
+
+        // Subtle sunlight shimmer across the curved glass barrel vault ribs
+        const shimmerAlpha = 0.07 + 0.04 * Math.sin(nowSec * 1.6);
+        c.fillStyle = `rgba(186, 230, 253, ${shimmerAlpha})`;
+        c.beginPath();
+        c.moveTo(px(0.32), py(0.24));
+        c.lineTo(px(0.64), py(0.03));
+        c.lineTo(px(0.95), py(0.26));
+        c.lineTo(px(0.64), py(0.47));
+        c.closePath();
+        c.fill();
+      } else if (viewId === 'E+1') {
+        // Glowing red halos on the 2 circular DB Info Rondells on E+1
+        const pulse = 0.25 + 0.14 * Math.sin(nowSec * 2.8);
+        c.strokeStyle = `rgba(239, 68, 68, ${pulse})`;
+        c.lineWidth = 2.5 * scaleFactor;
+        c.beginPath();
+        c.ellipse(px(0.324), py(0.345), 30 * scaleFactor, 18 * scaleFactor, 0, 0, Math.PI * 2);
+        c.stroke();
+        c.beginPath();
+        c.ellipse(px(0.402), py(0.600), 28 * scaleFactor, 17 * scaleFactor, 0, 0, Math.PI * 2);
+        c.stroke();
+      } else if (viewId === 'E0') {
+        // NW Europaplatz: Headlight glow & live badge on the BVG Buses at the bus stop
+        const glow = 0.55 + 0.35 * Math.sin(nowSec * 4.0);
+        c.fillStyle = `rgba(254, 240, 138, ${glow * 0.45})`;
+        c.beginPath();
+        c.ellipse(px(0.055), py(0.075), 14 * scaleFactor, 8 * scaleFactor, -0.4, 0, Math.PI * 2);
+        c.fill();
+        c.beginPath();
+        c.ellipse(px(0.018), py(0.115), 14 * scaleFactor, 8 * scaleFactor, -0.4, 0, Math.PI * 2);
+        c.fill();
+
+        // SE Washingtonplatz: Headlight glow & live badge on the Berlin Taxis
+        c.beginPath();
+        c.ellipse(px(0.945), py(0.915), 14 * scaleFactor, 8 * scaleFactor, -0.4, 0, Math.PI * 2);
+        c.fill();
+
+        if (showLabels) {
+          for (const [bx, by, txt, col] of [
+            [0.085, 0.055, 'BVG BUS M41 / M85 · Europaplatz', '#facc15'],
+            [0.915, 0.875, 'TAXISTAND · Washingtonplatz', '#facc15'],
+            [0.325, 0.315, 'DB Information Rondell', '#ef4444'],
+          ] as const) {
+            const lx = px(bx);
+            const ly = py(by);
+            c.font = `bold ${Math.max(8, Math.round(9.5 * scaleFactor))}px monospace`;
+            const tw = c.measureText(txt).width + 10;
+            c.fillStyle = 'rgba(15, 23, 42, 0.88)';
+            c.fillRect(lx - tw * 0.5, ly - 9, tw, 15);
+            c.strokeStyle = col;
+            c.lineWidth = 1.1;
+            c.strokeRect(lx - tw * 0.5, ly - 9, tw, 15);
+            c.fillStyle = '#f8fafc';
+            c.textAlign = 'center';
+            c.fillText(txt, lx, ly + 2);
+          }
+        }
+
+        // Rotating glass leaves inside the 3 NW and 3 SE Revolving Doors (Drehtüren)
+        const doorCenters = [
+          [0.098, 0.220],
+          [0.132, 0.195],
+          [0.165, 0.172],
+          [0.838, 0.865],
+          [0.868, 0.842],
+          [0.896, 0.820],
+        ];
+        for (const [dx, dy] of doorCenters) {
+          const cxDoor = px(dx);
+          const cyDoor = py(dy);
+          const angle = nowSec * 1.8;
+          c.strokeStyle = 'rgba(224, 242, 254, 0.78)';
+          c.lineWidth = 1.4 * scaleFactor;
+          c.beginPath();
+          c.moveTo(
+            cxDoor - Math.cos(angle) * 7 * scaleFactor,
+            cyDoor - Math.sin(angle) * 4 * scaleFactor
+          );
+          c.lineTo(
+            cxDoor + Math.cos(angle) * 7 * scaleFactor,
+            cyDoor + Math.sin(angle) * 4 * scaleFactor
+          );
+          c.stroke();
+        }
+      } else if (viewId === 'E-1') {
+        // Pulsing red Pharmacy 'A' sign and glowing blue U-Bahn U5 sign
+        const glow = 0.55 + 0.45 * Math.sin(nowSec * 3.2);
+        c.fillStyle = `rgba(239, 68, 68, ${glow * 0.32})`;
+        c.beginPath();
+        c.arc(px(0.32), py(0.48), 14 * scaleFactor, 0, Math.PI * 2);
+        c.fill();
+
+        // U-Bahn U5 portal beacon at top-right (NE)
+        c.fillStyle = `rgba(37, 99, 235, ${0.45 + 0.3 * Math.cos(nowSec * 2.5)})`;
+        c.fillRect(px(0.755), py(0.085), 52 * scaleFactor, 16 * scaleFactor);
+        if (showLabels) {
+          c.fillStyle = '#ffffff';
+          c.font = `bold ${Math.max(8, Math.round(10 * scaleFactor))}px monospace`;
+          c.textAlign = 'center';
+          c.fillText('U-BAHN U5 →', px(0.755) + 26 * scaleFactor, py(0.085) + 11 * scaleFactor);
+        }
+      } else if (viewId === 'E-2') {
+        // Headlight beams & animated door indicators on the 2 ICE trains, 2 Regio trains, and the yellow U5 train
+        const beamAlpha = 0.35 + 0.25 * Math.sin(nowSec * 3.0);
+        c.fillStyle = `rgba(254, 240, 138, ${beamAlpha})`;
+        for (const [bx, by] of [
+          [0.228, 0.652], // ICE Track 1 nose
+          [0.415, 0.700], // Regio Track 3 nose
+          [0.592, 0.525], // Regio Track 4 nose
+          [0.895, 0.695], // Yellow U-Bahn U5 nose
+        ]) {
+          c.beginPath();
+          c.ellipse(px(bx), py(by), 14 * scaleFactor, 8 * scaleFactor, -0.4, 0, Math.PI * 2);
+          c.fill();
+        }
+
+        if (showLabels) {
+          for (const [bx, by, txt, col] of [
+            [0.34, 0.28, 'ICE 592 → Frankfurt(M) · Gl. 2', '#38bdf8'],
+            [0.30, 0.54, 'ICE 1001 → München Hbf · Gl. 1', '#38bdf8'],
+            [0.57, 0.32, 'RE 3 / FEX → Flughafen BER · Gl. 4', '#ef4444'],
+            [0.835, 0.60, 'BVG U5 → Alex · Hönow', '#facc15'],
+          ] as const) {
+            const lx = px(bx);
+            const ly = py(by);
+            c.font = `bold ${Math.max(8, Math.round(9.5 * scaleFactor))}px monospace`;
+            const tw = c.measureText(txt).width + 10;
+            c.fillStyle = 'rgba(15, 23, 42, 0.88)';
+            c.fillRect(lx - tw * 0.5, ly - 9, tw, 15);
+            c.strokeStyle = col;
+            c.lineWidth = 1.2;
+            c.strokeRect(lx - tw * 0.5, ly - 9, tw, 15);
+            c.fillStyle = '#f8fafc';
+            c.textAlign = 'center';
+            c.fillText(txt, lx, ly + 2);
+          }
+        }
+      }
+
+      // 3. STEP AND DRAW AMBIENT WALKERS ON THIS BLUEPRINT VIEW
+      for (const w of walkersRef.current) {
+        if (w.viewId !== viewId) continue;
+        const pA = w.path[w.segIndex];
+        const pB = w.path[w.segIndex + 1] ?? w.path[0];
+        const wx = px(pA.x + (pB.x - pA.x) * w.segProgress);
+        const wy = py(pA.y + (pB.y - pA.y) * w.segProgress);
+
+        drawCommuterSprite(
+          c,
+          wx,
+          wy,
+          scaleFactor,
+          w.coatColor,
+          w.hairColor,
+          w.hasSuitcase,
+          w.suitcaseColor,
+          nowSec * 7 + w.id,
+          w.label
+        );
+      }
+    };
+
+    // Full Procedural Isometric Architecture Renderer (Mode B: 'procedural_iso')
+    // Faithfully constructs each level's geometry on the #3b4049 engineering grid
+    // matching the reference blueprints and fixing all previous geometry issues.
+    const drawProceduralLevel = (
+      c: CanvasRenderingContext2D,
+      viewId: StationViewId,
+      w: number,
+      h: number,
+      nowSec: number
+    ) => {
+      drawIsometricEngineeringGrid(c, w, h, 36);
+
+      const cx = w * 0.5 + panRef.current.x;
+      const cy = h * 0.52 + panRef.current.y;
+      const s = Math.min(w / 1280, h / 760) * zoomRef.current;
+
+      // Helper to convert tile coordinates (tx, ty) to screen (sx, sy)
+      const tileToScreen = (tx: number, ty: number, elev: number = 0) => ({
+        x: cx + (tx - ty) * 28 * s,
+        y: cy + (tx + ty) * 14 * s - elev * s,
+      });
+
+      // Draw an isometric floor polygon from tile bounds [tx1..tx2, ty1..ty2]
+      const drawFloorSlab = (
+        tx1: number,
+        ty1: number,
+        tx2: number,
+        ty2: number,
+        fillColor: string,
+        borderColor: string = '#475569',
+        thickness: number = 8,
+        subGrid: boolean = true
+      ) => {
+        const p1 = tileToScreen(tx1, ty1);
+        const p2 = tileToScreen(tx2, ty1);
+        const p3 = tileToScreen(tx2, ty2);
+        const p4 = tileToScreen(tx1, ty2);
+
+        // Slab thickness sides
+        c.fillStyle = '#4b5563';
+        c.beginPath();
+        c.moveTo(p4.x, p4.y);
+        c.lineTo(p3.x, p3.y);
+        c.lineTo(p3.x, p3.y + thickness * s);
+        c.lineTo(p4.x, p4.y + thickness * s);
+        c.closePath();
+        c.fill();
+
+        c.fillStyle = '#374151';
+        c.beginPath();
+        c.moveTo(p3.x, p3.y);
+        c.lineTo(p2.x, p2.y);
+        c.lineTo(p2.x, p2.y + thickness * s);
+        c.lineTo(p3.x, p3.y + thickness * s);
+        c.closePath();
+        c.fill();
+
+        // Top floor surface
+        c.fillStyle = fillColor;
+        c.beginPath();
+        c.moveTo(p1.x, p1.y);
+        c.lineTo(p2.x, p2.y);
+        c.lineTo(p3.x, p3.y);
+        c.lineTo(p4.x, p4.y);
+        c.closePath();
+        c.fill();
+        c.strokeStyle = borderColor;
+        c.lineWidth = 1.5 * s;
+        c.stroke();
+
+        if (subGrid) {
+          c.strokeStyle = 'rgba(100, 116, 139, 0.22)';
+          c.lineWidth = 0.8 * s;
+          c.beginPath();
+          for (let tx = tx1 + 1; tx < tx2; tx++) {
+            const a = tileToScreen(tx, ty1);
+            const b = tileToScreen(tx, ty2);
+            c.moveTo(a.x, a.y);
+            c.lineTo(b.x, b.y);
+          }
+          for (let ty = ty1 + 1; ty < ty2; ty++) {
+            const a = tileToScreen(tx1, ty);
+            const b = tileToScreen(tx2, ty);
+            c.moveTo(a.x, a.y);
+            c.lineTo(b.x, b.y);
+          }
+          c.stroke();
+        }
+      };
+
+      // Draw a cutaway shop room with 2 back walls + floor + interior furniture
+      const drawCutawayRoom = (
+        tx1: number,
+        ty1: number,
+        tx2: number,
+        ty2: number,
+        floorColor: string,
+        wallColor: string,
+        signText: string,
+        signColor: string
+      ) => {
+        drawFloorSlab(tx1, ty1, tx2, ty2, floorColor, '#334155', 4, true);
+        const wallH = 34 * s;
+        const pNW = tileToScreen(tx1, ty1);
+        const pNE = tileToScreen(tx2, ty1);
+        const pSW = tileToScreen(tx1, ty2);
+
+        // Back-left wall (tx1, ty1 -> tx1, ty2)
+        c.fillStyle = wallColor;
+        c.beginPath();
+        c.moveTo(pNW.x, pNW.y);
+        c.lineTo(pSW.x, pSW.y);
+        c.lineTo(pSW.x, pSW.y - wallH);
+        c.lineTo(pNW.x, pNW.y - wallH);
+        c.closePath();
+        c.fill();
+        c.strokeStyle = '#1e293b';
+        c.lineWidth = 1.2 * s;
+        c.stroke();
+
+        // Back-right wall (tx1, ty1 -> tx2, ty1)
+        c.fillStyle = wallColor;
+        c.beginPath();
+        c.moveTo(pNW.x, pNW.y);
+        c.lineTo(pNE.x, pNE.y);
+        c.lineTo(pNE.x, pNE.y - wallH);
+        c.lineTo(pNW.x, pNW.y - wallH);
+        c.closePath();
+        c.fill();
+        c.stroke();
+
+        // Signboard on back-right wall
+        const midX = (pNW.x + pNE.x) * 0.5;
+        const midY = (pNW.y + pNE.y) * 0.5 - wallH * 0.72;
+        c.fillStyle = signColor;
+        c.fillRect(midX - 34 * s, midY - 8 * s, 68 * s, 15 * s);
+        c.fillStyle = '#ffffff';
+        c.font = `bold ${Math.max(8, Math.round(9 * s))}px sans-serif`;
+        c.textAlign = 'center';
+        c.fillText(signText, midX, midY + 3 * s);
+      };
+
+      // Draw the signature Central Atrium Core (Lichthof) shared by all levels
+      const drawCentralAtriumCore = () => {
+        const p1 = tileToScreen(-3.2, -1.8);
+        const p2 = tileToScreen(3.2, -1.8);
+        const p3 = tileToScreen(3.2, 1.8);
+        const p4 = tileToScreen(-3.2, 1.8);
+
+        // Deep atrium shaft void
+        c.fillStyle = '#1e2530';
+        c.beginPath();
+        c.moveTo(p1.x, p1.y);
+        c.lineTo(p2.x, p2.y);
+        c.lineTo(p3.x, p3.y);
+        c.lineTo(p4.x, p4.y);
+        c.closePath();
+        c.fill();
+
+        // Steel-blue parapet curbing around the Atrium opening (matching #8db3c7 / #6585a5 swatch)
+        c.strokeStyle = '#8db3c7';
+        c.lineWidth = 6 * s;
+        c.stroke();
+        c.strokeStyle = '#1e293b';
+        c.lineWidth = 1.5 * s;
+        c.stroke();
+
+        // Escalator banks inside the Atrium
+        for (const offset of [-1.8, 1.8]) {
+          const eStart = tileToScreen(offset - 0.8, -1.2);
+          const eEnd = tileToScreen(offset + 0.8, 1.2);
+          c.strokeStyle = '#64748b';
+          c.lineWidth = 10 * s;
+          c.beginPath();
+          c.moveTo(eStart.x, eStart.y);
+          c.lineTo(eEnd.x, eEnd.y);
+          c.stroke();
+
+          c.strokeStyle = '#1e293b';
+          c.lineWidth = 6 * s;
+          c.beginPath();
+          c.moveTo(eStart.x, eStart.y);
+          c.lineTo(eEnd.x, eEnd.y);
+          c.stroke();
+        }
+
+        // Twin transparent cyan Glass Elevator Towers (Glasaufzüge)
+        for (const [tx, ty] of [
+          [-0.4, -0.5],
+          [0.9, 0.5],
+        ]) {
+          const ep = tileToScreen(tx, ty);
+          const cabinY = ep.y - (35 + 22 * Math.sin(nowSec * 1.2 + tx)) * s;
+          // Elevator cabin
+          drawIsoBox(
+            c,
+            ep.x,
+            cabinY,
+            14 * s,
+            14 * s,
+            20 * s,
+            '#bae6fd',
+            '#38bdf8',
+            '#0284c7',
+            '#0f172a'
+          );
+          // Glass shaft tower
+          drawIsoBox(
+            c,
+            ep.x,
+            ep.y,
+            16 * s,
+            16 * s,
+            92 * s,
+            'rgba(186, 230, 253, 0.35)',
+            'rgba(125, 211, 252, 0.26)',
+            'rgba(56, 189, 248, 0.32)',
+            '#6585a5'
+          );
+        }
+
+        // 4 Iconic Heavy Grey Concrete Columns along the NE edge of the Atrium
+        for (const colTx of [-3.5, -1.2, 1.2, 3.5]) {
+          const cp = tileToScreen(colTx, -2.5);
+          drawIsoBox(
+            c,
+            cp.x,
+            cp.y,
+            12 * s,
+            12 * s,
+            78 * s,
+            '#94a3b8',
+            '#6c7077',
+            '#535869',
+            '#1e2229'
+          );
+        }
+      };
+
+      if (viewId === 'E+2' || viewId === 'CUTAWAY') {
+        // E+2: Upper track deck + SE foyer + Curved Glass Barrel Vault
+        drawFloorSlab(-10, -8, 10, 8, '#cbd5e1', '#64748b', 10, true);
+        // Yellow tactile guide strips along platforms
+        for (const ty of [-5.2, -2.2, 2.4, 5.2]) {
+          const a = tileToScreen(-9.5, ty);
+          const b = tileToScreen(9.5, ty);
+          c.strokeStyle = '#eab308';
+          c.lineWidth = 2.5 * s;
+          c.beginPath();
+          c.moveTo(a.x, a.y);
+          c.lineTo(b.x, b.y);
+          c.stroke();
+        }
+        // Track beds
+        for (const ty of [-6.5, -3.8, 3.8, 6.5]) {
+          drawFloorSlab(-9.8, ty - 0.7, 9.8, ty + 0.7, '#475569', '#1e293b', 2, false);
+        }
+
+        drawCentralAtriumCore();
+
+        // Live trains on E+2
+        const icePos = Math.sin(nowSec * 0.45) * 2.5;
+        const pIceA = tileToScreen(-7 + icePos, 3.8);
+        const pIceB = tileToScreen(4 + icePos, 3.8);
+        drawLiveIsoTrain(c, pIceA.x, pIceA.y, pIceB.x, pIceB.y, 18 * s, 18 * s, 'ICE', 'ICE 948 Köln', nowSec);
+
+        const regPos = Math.cos(nowSec * 0.5) * 2.0;
+        const pRegA = tileToScreen(-6 + regPos, -3.8);
+        const pRegB = tileToScreen(5 + regPos, -3.8);
+        drawLiveIsoTrain(c, pRegA.x, pRegA.y, pRegB.x, pRegB.y, 18 * s, 17 * s, 'REGIO', 'RE 1 · S7', nowSec);
+
+        // Curved Glass Barrel Vault (Glasdach-Tonne) over the NE half
+        for (let tx = -8; tx <= 8; tx += 2) {
+          const pArchL = tileToScreen(tx, -7.8);
+          const pArchR = tileToScreen(tx, 1.5);
+          const midX = (pArchL.x + pArchR.x) * 0.5;
+          const midY = (pArchL.y + pArchR.y) * 0.5 - 120 * s;
+
+          c.strokeStyle = 'rgba(141, 179, 199, 0.85)';
+          c.lineWidth = 3 * s;
+          c.beginPath();
+          c.moveTo(pArchL.x, pArchL.y);
+          c.quadraticCurveTo(midX, midY, pArchR.x, pArchR.y);
+          c.stroke();
+        }
+      } else if (viewId === 'E+1') {
+        // E+1: Gallery level with cutaway shops, Bügelbauten offices & 2 Red DB Rondells
+        drawFloorSlab(-9.5, -7.5, 9.5, 7.5, '#d6d3d1', '#64748b', 10, true);
+        drawCutawayRoom(-9, -7, -3.5, -3.5, '#fef3c7', '#f59e0b', 'Presse & Buch', '#b45309');
+        drawCutawayRoom(2, -7, 9, -3.2, '#e2e8f0', '#6585a5', 'Bügelbauten · DB Leitstelle', '#1e3a8a');
+        drawCutawayRoom(-9, 2.5, -3.5, 7, '#f3e8ff', '#9333ea', 'Galerie-Café & Bistro', '#6b21a8');
+        drawCutawayRoom(3.5, 2.5, 9, 7, '#dcfce7', '#16a34a', 'Reisebedarf & Mode', '#15803d');
+
+        drawCentralAtriumCore();
+
+        // 2 Circular Red DB Info Rondells matching the E+1 reference image
+        const r1 = tileToScreen(-3.8, -1.2);
+        const r2 = tileToScreen(-2.2, 2.8);
+        drawIsoCylinder(c, r1.x, r1.y, 26 * s, 16 * s, 24 * s, '#991b1b', '#c94a4a', '#1e293b', 'DB INFO');
+        drawIsoCylinder(c, r2.x, r2.y, 26 * s, 16 * s, 24 * s, '#991b1b', '#c94a4a', '#1e293b', 'DB SERVICE');
+      } else if (viewId === 'E0') {
+        // E0: Ground floor with NW Europaplatz (BVG Buses), SE Washingtonplatz (Taxis), 2 Red DB Rondells, Bakeral
+        // Exterior roads
+        drawFloorSlab(-12, -9.5, -8.5, 3, '#64748b', '#334155', 4, false); // Europaplatz road
+        drawFloorSlab(8.5, -3, 12, 9.5, '#64748b', '#334155', 4, false); // Washingtonplatz road
+
+        // Main Hall Floor
+        drawFloorSlab(-8.5, -7.5, 8.5, 7.5, '#e7e5e4', '#57534e', 10, true);
+
+        // Cutaway Shops & Gastronomy
+        drawCutawayRoom(-8, -7, -2.5, -3.5, '#fef3c7', '#d97706', 'Bakeral Bäckerei', '#92400e');
+        drawCutawayRoom(2.5, -7, 8, -2.5, '#ffedd5', '#ea580c', 'Food Court & Café', '#9a3412');
+        drawCutawayRoom(-8, 2.5, -2.5, 7, '#fef9c3', '#ca8a04', 'Berliner Kaffeerösterei', '#854d0e');
+
+        drawCentralAtriumCore();
+
+        // 2 Iconic Circular Red DB Info Rondells on E0
+        const r1 = tileToScreen(-3.6, -1.0);
+        const r2 = tileToScreen(-2.0, 2.6);
+        drawIsoCylinder(c, r1.x, r1.y, 27 * s, 17 * s, 25 * s, '#991b1b', '#c94a4a', '#1e293b', 'DB INFO');
+        drawIsoCylinder(c, r2.x, r2.y, 27 * s, 17 * s, 25 * s, '#991b1b', '#c94a4a', '#1e293b', 'TICKETS');
+
+        // NW Europaplatz Glass Curtain Wall & 3 Revolving Doors
+        for (const ty of [-4.5, -2.5, -0.5]) {
+          const dp = tileToScreen(-8.4, ty);
+          drawIsoCylinder(c, dp.x, dp.y, 13 * s, 8 * s, 22 * s, '#94a3b8', 'rgba(125, 211, 252, 0.55)');
+        }
+        // Yellow BVG Buses outside Europaplatz
+        const bus1A = tileToScreen(-10.5, -6.2);
+        const bus1B = tileToScreen(-10.5, -2.5);
+        drawLiveIsoTrain(c, bus1A.x, bus1A.y, bus1B.x, bus1B.y, 14 * s, 15 * s, 'BVG_BUS', 'BVG M41', nowSec);
+
+        // SE Washingtonplatz Glass Curtain Wall, 3 Revolving Doors & Yellow Taxis
+        for (const ty of [0.5, 2.5, 4.5]) {
+          const dp = tileToScreen(8.4, ty);
+          drawIsoCylinder(c, dp.x, dp.y, 13 * s, 8 * s, 22 * s, '#94a3b8', 'rgba(125, 211, 252, 0.55)');
+        }
+        const taxi1A = tileToScreen(10.2, 2.0);
+        const taxi1B = tileToScreen(10.2, 4.0);
+        drawLiveIsoTrain(c, taxi1A.x, taxi1A.y, taxi1B.x, taxi1B.y, 12 * s, 10 * s, 'TAXI', 'TAXI', nowSec);
+      } else if (viewId === 'E-1') {
+        // E-1: Mezzanine with Green Supermarket (NW), Pharmacy, Lockers, Asia Bistro, and U5 Transfer Corridor (NE)
+        drawFloorSlab(-9.5, -7.5, 9.5, 7.5, '#cbd5e1', '#475569', 10, true);
+        // U-Bahn U5 NE Corridor Extension
+        drawFloorSlab(3.5, -10.5, 9.5, -7.5, '#bfdbfe', '#2563eb', 10, true);
+
+        drawCutawayRoom(-9, -7, -2.5, -2.5, '#dcfce7', '#16a34a', 'HBF SUPERMARKT', '#166534');
+        drawCutawayRoom(-9, 1.5, -3.5, 6.8, '#f8fafc', '#ef4444', 'APOTHEKE [A] & WC', '#dc2626');
+        drawCutawayRoom(3.2, 2.0, 9.0, 7.0, '#ffedd5', '#b91c1c', 'ASIA BISTRO & SCHLIESSFÄCHER', '#991b1b');
+        drawCutawayRoom(4.0, -10.2, 9.2, -7.2, '#dbeafe', '#1d4ed8', 'ÜBERGANG U-BAHN U5', '#1e40af');
+
+        drawCentralAtriumCore();
+      } else if (viewId === 'E-2') {
+        // E-2: Deep Underground North-South Tracks (with Tunnel Portals in Earth) + Separate Yellow U5 Platform
+        drawFloorSlab(-10.5, -8.0, 6.5, 8.0, '#94a3b8', '#334155', 12, true);
+        // Separate U-Bahn U5 Platform on the East/Right side
+        drawFloorSlab(7.2, -6.5, 11.8, 7.5, '#cbd5e1', '#1d4ed8', 12, true);
+
+        // Earth Embankment Cross-Sections & Concrete Tunnel Portals at North/South ends
+        drawCutawayRoom(-10.2, -7.8, 6.2, -6.2, '#475569', '#78350f', 'NORD-SÜD-TUNNELPORTALE', '#451a03');
+
+        // 4 Mainline Deep Tracks + Trains
+        const pIce1A = tileToScreen(-8.2, -5.5);
+        const pIce1B = tileToScreen(-8.2, 5.5);
+        drawLiveIsoTrain(c, pIce1A.x, pIce1A.y, pIce1B.x, pIce1B.y, 18 * s, 18 * s, 'ICE', 'ICE 1001 München', nowSec);
+
+        const pReg1A = tileToScreen(-4.5, -5.0);
+        const pReg1B = tileToScreen(-4.5, 5.2);
+        drawLiveIsoTrain(c, pReg1A.x, pReg1A.y, pReg1B.x, pReg1B.y, 18 * s, 17 * s, 'REGIO', 'RE 3 · FEX BER', nowSec);
+
+        const pIce2A = tileToScreen(4.2, -5.2);
+        const pIce2B = tileToScreen(4.2, 5.5);
+        drawLiveIsoTrain(c, pIce2A.x, pIce2A.y, pIce2B.x, pIce2B.y, 18 * s, 18 * s, 'ICE', 'ICE 592 Frankfurt', nowSec);
+
+        // Yellow BVG U-Bahn U5 Train on the right-hand U5 platform
+        const pU5A = tileToScreen(9.6, -4.8);
+        const pU5B = tileToScreen(9.6, 5.2);
+        drawLiveIsoTrain(c, pU5A.x, pU5A.y, pU5B.x, pU5B.y, 16 * s, 16 * s, 'UBAHN_U5', 'U5 Hönow ↔ Hbf', nowSec);
+
+        drawCentralAtriumCore();
+      }
+
+      // Draw live NPCs from simulation state on the procedural level
+      const targetLvl: StationLevelId =
+        viewId === 'E+2'
+          ? 2
+          : viewId === 'E+1'
+            ? 1
+            : viewId === 'E0' || viewId === 'CUTAWAY'
+              ? 0
+              : viewId === 'E-1'
+                ? -1
+                : -2;
+
+      for (const npc of npcsRef.current) {
+        if (viewId !== 'CUTAWAY' && npc.level !== targetLvl) continue;
+        const pos = tileToScreen(npc.wx * 0.75, npc.wy * 0.75);
+        drawCommuterSprite(
+          c,
+          pos.x,
+          pos.y,
+          s,
+          npc.coatColor,
+          npc.accentColor,
+          npc.hasLuggage,
+          '#dc2626',
+          npc.walkPhase,
+          npc.thoughtBubble
+        );
+      }
     };
 
     const renderFrame = (now: number) => {
-      if (isDisposed) return;
-
-      const rawDt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+      const rawDt = Math.min(0.1, Math.max(0.001, (now - lastTime) / 1000));
       lastTime = now;
+      const dt = rawDt * simSpeed;
+      const nowSec = now / 1000;
 
-      const {
-        cameraPreset: preset,
-        renderStyle: styleMode,
-        timeScale: ts,
-        lightingMode: lightMode,
-        showLabels: labelsOn,
-      } = propsRef.current;
-
-      // Update camera preset targets smoothly if preset changed
-      if (preset !== lastPreset) {
-        lastPreset = preset;
-        if (preset === 'overview') {
-          targetPanX = 0;
-          targetPanY = 0;
-          targetZoom = 1.0;
-        } else if (preset === 'concourse') {
-          targetPanX = -60;
-          targetPanY = 95;
-          targetZoom = 1.42;
-        } else if (preset === 'deep_tracks') {
-          targetPanX = 85;
-          targetPanY = -125;
-          targetZoom = 1.35;
-        } else if (preset === 'upper_tracks') {
-          targetPanX = -140;
-          targetPanY = 175;
-          targetZoom = 1.38;
-        }
-      }
-
-      camPanX += (targetPanX - camPanX) * Math.min(1, rawDt * 8);
-      camPanY += (targetPanY - camPanY) * Math.min(1, rawDt * 8);
-      camZoom += (targetZoom - camZoom) * Math.min(1, rawDt * 8);
-
-      // Step train timetable & NPCs
-      const simDt = rawDt * ts;
-      if (simDt > 0) {
-        stationClockRef.current = (stationClockRef.current + simDt * 0.85) % 1440;
-        stepTrainTimetable(trainsRef.current, simDt);
+      // Advance simulation state (trains, NPCs, ambient blueprint walkers)
+      if (simSpeed > 0) {
+        stationMinutesRef.current += dt * 0.85;
+        stepTrainTimetable(trainsRef.current, dt);
         for (const npc of npcsRef.current) {
-          stepNpcAgent(npc, trainsRef.current, 0, 0, 0, simDt);
+          stepNpcAgent(npc, trainsRef.current, 0, 0, 0, dt);
+        }
+        for (const w of walkersRef.current) {
+          w.segProgress += w.speed * dt * 2.2;
+          if (w.segProgress >= 1) {
+            w.segProgress = 0;
+            w.segIndex = (w.segIndex + 1) % Math.max(1, w.path.length - 1);
+          }
         }
       }
 
-      if (now - lastClockSync > 250) {
-        lastClockSync = now;
-        propsRef.current.onTickClock();
-      }
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
 
-      ctx.save();
-      ctx.scale(dpr, dpr);
+      // =========================================================================
+      // MODE 3: ALL 6 LEVELS OVERVIEW GRID ('all_levels_grid')
+      // =========================================================================
+      if (renderStyle === 'all_levels_grid') {
+        drawIsometricEngineeringGrid(ctx, w, h, 32);
 
-      // If user selected pure Reference Art mode, render the high-res reference illustration full-bleed with live animated light & train indicators!
-      if (styleMode === 'reference_art' && bgImgRef.current) {
-        ctx.fillStyle = '#18181b';
-        ctx.fillRect(0, 0, width, height);
+        const topPad = Math.max(48, h * 0.065);
+        const botPad = 14;
+        const sidePad = 16;
+        const cols = 3;
+        const rows = 2;
+        const gap = 14;
+        const cellW = (w - sidePad * 2 - gap * (cols - 1)) / cols;
+        const cellH = (h - topPad - botPad - gap * (rows - 1)) / rows;
 
-        const img = bgImgRef.current;
-        const scale = Math.max(width / img.width, height / img.height) * camZoom;
-        const iw = img.width * scale;
-        const ih = img.height * scale;
-        const ix = (width - iw) * 0.5 + camPanX;
-        const iy = (height - ih) * 0.5 + camPanY;
+        STATION_BLUEPRINTS.forEach((bp, idx) => {
+          const col = idx % cols;
+          const row = Math.floor(idx / cols);
+          const x = sidePad + col * (cellW + gap);
+          const y = topPad + row * (cellH + gap);
 
-        ctx.drawImage(img, ix, iy, iw, ih);
-        ctx.restore();
-        scheduleNextFrame();
-        return;
-      }
-
-      const cx = width * 0.48 + camPanX;
-      const cy = height * 0.56 + camPanY;
-
-      // ======================================================================
-      // 1. ARCHITECTURAL VAULTED TUNNEL HALL BACKGROUND & WARM SCONCE LIGHTING
-      // ======================================================================
-      const bgGrad = ctx.createLinearGradient(0, 0, 0, height);
-      if (lightMode === 'daylight') {
-        bgGrad.addColorStop(0, '#475569');
-        bgGrad.addColorStop(0.5, '#64748b');
-        bgGrad.addColorStop(1, '#334155');
-      } else if (lightMode === 'night') {
-        bgGrad.addColorStop(0, '#111827');
-        bgGrad.addColorStop(0.5, '#1e293b');
-        bgGrad.addColorStop(1, '#090d16');
-      } else {
-        // Warm concrete station palette matching reference image
-        bgGrad.addColorStop(0, '#3a3c42');
-        bgGrad.addColorStop(0.45, '#4b4e57');
-        bgGrad.addColorStop(1, '#26272b');
-      }
-      ctx.fillStyle = bgGrad;
-      ctx.fillRect(0, 0, width, height);
-
-      // If Hybrid Illustrated mode is active, blend the architectural reference texture subtly underneath
-      if (styleMode === 'hybrid_illustrated' && bgImgRef.current) {
-        ctx.save();
-        ctx.globalAlpha = 0.34;
-        const img = bgImgRef.current;
-        const scale = Math.max(width / img.width, height / img.height) * camZoom;
-        const iw = img.width * scale;
-        const ih = img.height * scale;
-        ctx.drawImage(img, (width - iw) * 0.5 + camPanX, (height - ih) * 0.5 + camPanY, iw, ih);
-        ctx.restore();
-      }
-
-      // Vaulted Concrete Arch Ribs & Linear Wall Luminaires (top-left & top-right tunnel walls)
-      ctx.save();
-      ctx.strokeStyle = 'rgba(24, 24, 27, 0.45)';
-      ctx.lineWidth = 4 * camZoom;
-      for (let i = -5; i <= 5; i++) {
-        ctx.beginPath();
-        ctx.ellipse(
-          cx + i * 130 * camZoom,
-          cy - 60 * camZoom,
-          720 * camZoom,
-          490 * camZoom,
-          -0.25,
-          Math.PI * 0.92,
-          Math.PI * 2.08
-        );
-        ctx.stroke();
-      }
-
-      // Warm linear tunnel wall lights along both upper walls
-      for (let u = -11; u <= 9; u += 4) {
-        const wallPt = projectIso(u, -10.2, 75, cx, cy, camZoom);
-        const g = ctx.createRadialGradient(
-          wallPt.sx,
-          wallPt.sy,
-          2,
-          wallPt.sx,
-          wallPt.sy,
-          42 * camZoom
-        );
-        g.addColorStop(0, 'rgba(254, 243, 199, 0.92)');
-        g.addColorStop(0.45, 'rgba(245, 158, 11, 0.32)');
-        g.addColorStop(1, 'rgba(245, 158, 11, 0)');
-        ctx.fillStyle = g;
-        ctx.beginPath();
-        ctx.arc(wallPt.sx, wallPt.sy, 42 * camZoom, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.strokeStyle = '#fef3c7';
-        ctx.lineWidth = 3.2 * camZoom;
-        ctx.beginPath();
-        ctx.moveTo(wallPt.sx - 14 * camZoom, wallPt.sy + 7 * camZoom);
-        ctx.lineTo(wallPt.sx + 14 * camZoom, wallPt.sy - 7 * camZoom);
-        ctx.stroke();
-      }
-      ctx.restore();
-
-      const trains = trainsRef.current;
-      const npcs = npcsRef.current;
-
-      // ======================================================================
-      // 2. LOWER & UPPER TRACKS + PLATFORMS (BACK-TO-FRONT PAINTER'S ORDER BY `v`)
-      // ======================================================================
-      // Base station foundation slab
-      fillIsoPoly(
-        [
-          { u: -15, v: -10.5, z: -4 },
-          { u: 15, v: -10.5, z: -4 },
-          { u: 15, v: 10.5, z: -4 },
-          { u: -15, v: 10.5, z: -4 },
-        ],
-        cx,
-        cy,
-        camZoom,
-        '#272523',
-        '#1c1917',
-        1.5
-      );
-
-      // Track 1 (Far top-left track: v = -8.6)
-      drawRealisticTrack(-8.6, -14.5, 14.5, 0, cx, cy, camZoom);
-
-      // Platform A (v = -7.6 to -5.4)
-      drawRealisticPlatform(
-        -7.6,
-        -5.4,
-        -14,
-        14,
-        0,
-        cx,
-        cy,
-        camZoom,
-        'GLEIS 1 / 2 · ICE FERNBAHN',
-        true
-      );
-
-      // Track 2 (ICE High-Speed Track on left: v = -4.2)
-      drawRealisticTrack(-4.2, -14.5, 14.5, 0, cx, cy, camZoom);
-      const trIceLeft = trains[0];
-      drawRealisticTrain(
-        -4.2,
-        -3.5 + trIceLeft.positionAlongTrack * 0.28,
-        0,
-        'ICE',
-        trIceLeft.lineCode,
-        trIceLeft.destination,
-        trIceLeft.state === 'BOARDING',
-        cx,
-        cy,
-        camZoom
-      );
-
-      // Platform B (Central Left Platform: v = -3.0 to -0.8)
-      drawRealisticPlatform(
-        -3.0,
-        -0.8,
-        -14,
-        14,
-        0,
-        cx,
-        cy,
-        camZoom,
-        'GLEIS 3 / 4 · REGIONAL & EC',
-        false
-      );
-
-      // Track 3 (Center Red DB Regio Track: v = 0.5)
-      drawRealisticTrack(0.5, -14.5, 14.5, 0, cx, cy, camZoom);
-      const trRegioCenter = trains[1];
-      drawRealisticTrain(
-        0.5,
-        -2.2 + trRegioCenter.positionAlongTrack * 0.25,
-        0,
-        'REGIO',
-        trRegioCenter.lineCode,
-        trRegioCenter.destination,
-        trRegioCenter.state === 'BOARDING',
-        cx,
-        cy,
-        camZoom
-      );
-
-      // Platform C (Central Right Platform: v = 1.7 to 3.9)
-      drawRealisticPlatform(
-        1.7,
-        3.9,
-        -14,
-        14,
-        0,
-        cx,
-        cy,
-        camZoom,
-        'GLEIS 5 / 6 · FEX FLUGHAFEN BER',
-        false
-      );
-
-      // Track 4 (Lower Right Red S-Bahn / FEX Track: v = 5.1)
-      drawRealisticTrack(5.1, -14.5, 14.5, 0, cx, cy, camZoom);
-      const trFexRight = trains[2];
-      drawRealisticTrain(
-        5.1,
-        -1.5 + trFexRight.positionAlongTrack * 0.25,
-        0,
-        'FEX',
-        trFexRight.lineCode,
-        trFexRight.destination,
-        trFexRight.state === 'BOARDING',
-        cx,
-        cy,
-        camZoom
-      );
-
-      // Track 5 (Parallel White ICE Sprinter Track on Right: v = 6.9)
-      drawRealisticTrack(6.9, -14.5, 14.5, 0, cx, cy, camZoom);
-      const trIceRight = trains[3];
-      drawRealisticTrain(
-        6.9,
-        1.2 + trIceRight.positionAlongTrack * 0.25,
-        0,
-        'ICE',
-        trIceRight.lineCode,
-        trIceRight.destination,
-        trIceRight.state === 'BOARDING',
-        cx,
-        cy,
-        camZoom
-      );
-
-      // Platform D (Foreground Right Platform: v = 8.1 to 10.1)
-      drawRealisticPlatform(
-        8.1,
-        10.1,
-        -14,
-        14,
-        0,
-        cx,
-        cy,
-        camZoom,
-        'GLEIS 7 / 8 · ICE SPRINTER',
-        false
-      );
-
-      // Render Commuters on the Lower Platforms
-      for (let i = 0; i < 14; i++) {
-        const npc = npcs[i % npcs.length];
-        const platV = [-6.5, -1.9, 2.8, 9.0][i % 4];
-        const uWalk = ((npc.wx * 1.1 + i * 2.3) % 18) - 9;
-        drawRealisticCommuter(
-          uWalk,
-          platV + ((i % 3) - 1) * 0.35,
-          16,
-          npc.coatColor,
-          '#1e293b',
-          npc.walkPhase + now * 0.004,
-          npc.hasLuggage,
-          cx,
-          cy,
-          camZoom
-        );
-      }
-
-      // ======================================================================
-      // 3. UPPER STADTBAHN VIADUCT GALLERY (TOP-RIGHT ELEVATED RED S-BAHN)
-      // (Directly matching the elevated red train in the top-right of the reference art!)
-      // ======================================================================
-      const zUpperViaduct = 148;
-      drawPrism(
-        6.2,
-        14.2,
-        -10.2,
-        10.2,
-        zUpperViaduct - 14,
-        zUpperViaduct,
-        cx,
-        cy,
-        camZoom,
-        '#b8b2a8',
-        '#78716c',
-        '#57534e',
-        '#1c1917',
-        1.2
-      );
-
-      // Long Red S-Bahn Train running along the elevated viaduct (`v` axis from -9 to +9 at u = 10.5)
-      const sBahnShift = Math.sin(now * 0.0005) * 1.8;
-      for (let sc = -2; sc <= 1; sc++) {
-        const sv1 = sc * 4.2 + sBahnShift;
-        const sv2 = sv1 + 3.85;
-        drawPrism(
-          9.4,
-          11.2,
-          sv1,
-          sv2,
-          zUpperViaduct + 2,
-          zUpperViaduct + 30,
-          cx,
-          cy,
-          camZoom,
-          '#991b1b',
-          '#dc2626',
-          '#b91c1c',
-          '#1c1917',
-          1.1
-        );
-        // S-Bahn Window Ribbon along front-left face (u = 9.4)
-        fillIsoPoly(
-          [
-            { u: 9.39, v: sv1 + 0.3, z: zUpperViaduct + 14 },
-            { u: 9.39, v: sv2 - 0.3, z: zUpperViaduct + 14 },
-            { u: 9.39, v: sv2 - 0.3, z: zUpperViaduct + 23 },
-            { u: 9.39, v: sv1 + 0.3, z: zUpperViaduct + 23 },
-          ],
-          cx,
-          cy,
-          camZoom,
-          '#1e293b',
-          '#fde68a',
-          0.6
-        );
-      }
-
-      // ======================================================================
-      // 4. ELEVATED CENTRAL CONCOURSE GALLERY BRIDGE (EBENE 0: EINKAUFSPASSAGE)
-      // (Directly matching the bridge with Bakeral, Bank, Twin Escalators, and Press-shop!)
-      // ======================================================================
-      const zBridgeBot = 78;
-      const zBridgeTop = 94;
-
-      // Cast dark ambient shadow from the concourse bridge onto the platforms/tracks below
-      fillIsoPoly(
-        [
-          { u: 0.2, v: -9.5, z: 16.5 },
-          { u: 6.8, v: -9.5, z: 16.5 },
-          { u: 6.8, v: 10.2, z: 16.5 },
-          { u: 0.2, v: 10.2, z: 16.5 },
-        ],
-        cx,
-        cy,
-        camZoom,
-        'rgba(10, 12, 18, 0.42)'
-      );
-
-      // Main Concourse Bridge Structural Deck
-      drawPrism(
-        0.5,
-        7.2,
-        -9.8,
-        10.2,
-        zBridgeBot,
-        zBridgeTop,
-        cx,
-        cy,
-        camZoom,
-        '#e7e2d8',
-        '#9ca3af',
-        '#6b7280',
-        '#1f2937',
-        1.3
-      );
-
-      // Concourse Floor Tile Grid & Yellow Tactile Strip
-      ctx.strokeStyle = 'rgba(100, 116, 139, 0.25)';
-      ctx.lineWidth = 0.8 * camZoom;
-      for (let v = -9; v <= 9.5; v += 1.2) {
-        const p1 = projectIso(0.5, v, zBridgeTop, cx, cy, camZoom);
-        const p2 = projectIso(7.2, v, zBridgeTop, cx, cy, camZoom);
-        ctx.beginPath();
-        ctx.moveTo(p1.sx, p1.sy);
-        ctx.lineTo(p2.sx, p2.sy);
-        ctx.stroke();
-      }
-
-      fillIsoPoly(
-        [
-          { u: 2.2, v: -9.2, z: zBridgeTop + 0.5 },
-          { u: 2.45, v: -9.2, z: zBridgeTop + 0.5 },
-          { u: 2.45, v: 9.6, z: zBridgeTop + 0.5 },
-          { u: 2.2, v: 9.6, z: zBridgeTop + 0.5 },
-        ],
-        cx,
-        cy,
-        camZoom,
-        '#eab308'
-      );
-
-      // Glass Safety Balustrade along front-left edge of the concourse bridge (u = 0.5)
-      fillIsoPoly(
-        [
-          { u: 0.5, v: -9.5, z: zBridgeTop },
-          { u: 0.5, v: 10.0, z: zBridgeTop },
-          { u: 0.5, v: 10.0, z: zBridgeTop + 12 },
-          { u: 0.5, v: -9.5, z: zBridgeTop + 12 },
-        ],
-        cx,
-        cy,
-        camZoom,
-        'rgba(186, 230, 253, 0.34)',
-        '#475569',
-        1.1
-      );
-
-      // Staircases descending from the Concourse Bridge down to Platforms B & C
-      for (const stairV of [-2.4, 2.3]) {
-        // Sloped stair ramp from u = 0.5 (z=94) down to u = -2.2 (z=16)
-        fillIsoPoly(
-          [
-            { u: -2.2, v: stairV - 0.65, z: 16 },
-            { u: -2.2, v: stairV + 0.65, z: 16 },
-            { u: 0.5, v: stairV + 0.65, z: zBridgeTop },
-            { u: 0.5, v: stairV - 0.65, z: zBridgeTop },
-          ],
-          cx,
-          cy,
-          camZoom,
-          '#94a3b8',
-          '#334155',
-          1.1
-        );
-        // Individual stair treads
-        ctx.strokeStyle = '#475569';
-        ctx.lineWidth = 1.2 * camZoom;
-        for (let s = 0; s <= 10; s++) {
-          const t = s / 10;
-          const su = -2.2 + t * 2.7;
-          const sz = 16 + t * (zBridgeTop - 16);
-          const sp1 = projectIso(su, stairV - 0.62, sz, cx, cy, camZoom);
-          const sp2 = projectIso(su, stairV + 0.62, sz, cx, cy, camZoom);
+          ctx.save();
           ctx.beginPath();
-          ctx.moveTo(sp1.sx, sp1.sy);
-          ctx.lineTo(sp2.sx, sp2.sy);
-          ctx.stroke();
-        }
-      }
+          ctx.roundRect(x, y, cellW, cellH, 8);
+          ctx.clip();
 
-      // ======================================================================
-      // 5. REALISTIC SHOPS, ESCALATORS & GLASS ELEVATORS ON THE CONCOURSE BRIDGE
-      // ======================================================================
+          ctx.fillStyle = '#3b4049';
+          ctx.fillRect(x, y, cellW, cellH);
 
-      // A. BAKERAL (Warm Bakery Storefront at v = -5.2 to -2.4, u = 4.2 to 6.8)
-      drawPrism(
-        4.2,
-        6.9,
-        -5.4,
-        -2.6,
-        zBridgeTop,
-        zBridgeTop + 46,
-        cx,
-        cy,
-        camZoom,
-        '#78350f',
-        '#fef3c7', // Warm illuminated bakery interior on front-left face!
-        '#92400e',
-        '#1c1917',
-        1.2
-      );
-      // Bakery pastry counter & fascia sign
-      drawPrism(
-        4.0,
-        4.5,
-        -5.2,
-        -2.8,
-        zBridgeTop,
-        zBridgeTop + 16,
-        cx,
-        cy,
-        camZoom,
-        '#f59e0b',
-        '#b45309',
-        '#78350f',
-        '#1c1917',
-        1.0
-      );
-      // Fascia header
-      fillIsoPoly(
-        [
-          { u: 4.18, v: -5.4, z: zBridgeTop + 34 },
-          { u: 4.18, v: -2.6, z: zBridgeTop + 34 },
-          { u: 4.18, v: -2.6, z: zBridgeTop + 45 },
-          { u: 4.18, v: -5.4, z: zBridgeTop + 45 },
-        ],
-        cx,
-        cy,
-        camZoom,
-        '#78350f',
-        '#451a03',
-        1.0
-      );
-      if (labelsOn) {
-        const bakPt = projectIso(4.18, -4.0, zBridgeTop + 39, cx, cy, camZoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(11 * camZoom)}px "Plus Jakarta Sans", sans-serif`;
-        ctx.fillStyle = '#fde68a';
-        ctx.textAlign = 'center';
-        ctx.fillText('Bakeral', bakPt.sx, bakPt.sy);
-        ctx.restore();
-      }
+          const imgUrl =
+            bp.viewId === 'E0' && useAltE0Variant && bp.altReferenceImage
+              ? bp.altReferenceImage
+              : bp.referenceImage;
+          const img = imagesRef.current[imgUrl];
 
-      // B. BANK · DB REISEZENTRUM (Blue Storefront at v = -2.4 to -0.2, u = 4.2 to 6.9)
-      drawPrism(
-        4.2,
-        6.9,
-        -2.4,
-        -0.1,
-        zBridgeTop,
-        zBridgeTop + 46,
-        cx,
-        cy,
-        camZoom,
-        '#1e3a8a',
-        '#dbeafe',
-        '#1d4ed8',
-        '#0f172a',
-        1.2
-      );
-      fillIsoPoly(
-        [
-          { u: 4.18, v: -2.4, z: zBridgeTop + 34 },
-          { u: 4.18, v: -0.1, z: zBridgeTop + 34 },
-          { u: 4.18, v: -0.1, z: zBridgeTop + 45 },
-          { u: 4.18, v: -2.4, z: zBridgeTop + 45 },
-        ],
-        cx,
-        cy,
-        camZoom,
-        '#1d4ed8',
-        '#1e3a8a',
-        1.0
-      );
-      if (labelsOn) {
-        const bnkPt = projectIso(4.18, -1.25, zBridgeTop + 39, cx, cy, camZoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(10.5 * camZoom)}px "Plus Jakarta Sans", sans-serif`;
-        ctx.fillStyle = '#ffffff';
-        ctx.textAlign = 'center';
-        ctx.fillText('Bank · DB', bnkPt.sx, bnkPt.sy);
-        ctx.restore();
-      }
+          if (img && img.complete && img.naturalWidth > 0) {
+            const cropTopRatio = bp.viewId === 'CUTAWAY' ? 0 : 0.062;
+            const srcX = 0;
+            const srcY = img.naturalHeight * cropTopRatio;
+            const srcW = img.naturalWidth;
+            const srcH = img.naturalHeight * (1 - cropTopRatio);
 
-      // C. TWIN ESCALATORS (Rolltreppen ascending from Concourse Bridge to Upper Stadtbahn Level)
-      for (const escV of [0.5, 1.55]) {
-        fillIsoPoly(
-          [
-            { u: 2.6, v: escV - 0.35, z: zBridgeTop },
-            { u: 2.6, v: escV + 0.35, z: zBridgeTop },
-            { u: 5.8, v: escV + 0.35, z: zUpperViaduct },
-            { u: 5.8, v: escV - 0.35, z: zUpperViaduct },
-          ],
-          cx,
-          cy,
-          camZoom,
-          '#475569',
-          '#1e293b',
-          1.2
-        );
-        // Animated escalator steps
-        const stepOffset = (now * 0.003) % 1;
-        ctx.strokeStyle = '#94a3b8';
-        ctx.lineWidth = 1.3 * camZoom;
-        for (let s = 0; s < 10; s++) {
-          const t = (s + stepOffset) / 10;
-          const eu = 2.6 + t * 3.2;
-          const ez = zBridgeTop + t * (zUpperViaduct - zBridgeTop);
-          const ep1 = projectIso(eu, escV - 0.3, ez, cx, cy, camZoom);
-          const ep2 = projectIso(eu, escV + 0.3, ez, cx, cy, camZoom);
+            const contentY = y + 26;
+            const contentH = cellH - 26;
+            const imgAspect = srcW / srcH;
+            const cellAspect = cellW / contentH;
+            let drawW = cellW;
+            let drawH = contentH;
+            if (cellAspect > imgAspect) {
+              drawH = contentH;
+              drawW = drawH * imgAspect;
+            } else {
+              drawW = cellW;
+              drawH = drawW / imgAspect;
+            }
+            const dx = x + (cellW - drawW) * 0.5;
+            const dy = contentY + (contentH - drawH) * 0.5;
+            ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, drawW, drawH);
+            drawBlueprintLiveOverlays(ctx, bp.viewId, dx, dy, drawW, drawH, nowSec, 0.52);
+          }
+
+          // Card Header Bar matching the reference style
+          ctx.fillStyle = 'rgba(30, 34, 41, 0.96)';
+          ctx.fillRect(x, y, cellW, 26);
+          ctx.fillStyle = bp.color;
+          ctx.fillRect(x, y, 5, 26);
+
+          ctx.fillStyle = '#f1f5f9';
+          ctx.font = 'bold 11px monospace';
+          ctx.textAlign = 'left';
+          ctx.fillText(`${bp.shortCode} — ${bp.subtitle.split('·')[0].trim()}`, x + 12, y + 17);
+
+          ctx.restore();
+
+          // Border highlight
+          ctx.strokeStyle = bp.viewId === activeView ? '#f59e0b' : '#535869';
+          ctx.lineWidth = bp.viewId === activeView ? 2.5 : 1.2;
           ctx.beginPath();
-          ctx.moveTo(ep1.sx, ep1.sy);
-          ctx.lineTo(ep2.sx, ep2.sy);
+          ctx.roundRect(x, y, cellW, cellH, 8);
           ctx.stroke();
+        });
+      }
+      // =========================================================================
+      // MODE 2: PROCEDURAL ISOMETRIC ARCHITECTURE ('procedural_iso')
+      // =========================================================================
+      else if (renderStyle === 'procedural_iso') {
+        drawProceduralLevel(ctx, activeView, w, h, nowSec);
+      }
+      // =========================================================================
+      // MODE 1: HIGH-RES REFERENCE TILEMAP + LIVE SIMULATION ('reference_live')
+      // =========================================================================
+      else {
+        drawIsometricEngineeringGrid(ctx, w, h, 36);
+
+        const bp =
+          STATION_BLUEPRINTS.find((b) => b.viewId === activeView) ?? STATION_BLUEPRINTS[2];
+        const imgUrl =
+          bp.viewId === 'E0' && useAltE0Variant && bp.altReferenceImage
+            ? bp.altReferenceImage
+            : bp.referenceImage;
+        const img = imagesRef.current[imgUrl];
+
+        if (img && img.complete && img.naturalWidth > 0) {
+          const cropTopRatio = bp.viewId === 'CUTAWAY' ? 0 : 0.062;
+          const srcX = 0;
+          const srcY = img.naturalHeight * cropTopRatio;
+          const srcW = img.naturalWidth;
+          const srcH = img.naturalHeight * (1 - cropTopRatio);
+
+          const topMargin = 36;
+          const availW = w;
+          const availH = h - topMargin;
+          const imgAspect = srcW / srcH;
+          const viewAspect = availW / availH;
+
+          let baseW = availW;
+          let baseH = availH;
+          if (viewAspect > imgAspect) {
+            baseH = availH * 0.99;
+            baseW = baseH * imgAspect;
+          } else {
+            baseW = availW * 0.99;
+            baseH = baseW / imgAspect;
+          }
+
+          const drawW = baseW * zoomRef.current;
+          const drawH = baseH * zoomRef.current;
+          const dx = (w - drawW) * 0.5 + panRef.current.x;
+          const dy = topMargin + (availH - drawH) * 0.5 + panRef.current.y;
+
+          // Subtle drop shadow under the tilemap board
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
+          ctx.fillRect(dx + 6, dy + 8, drawW, drawH);
+
+          // Draw the crisp reference tilemap architecture without the duplicate top header strip
+          ctx.drawImage(img, srcX, srcY, srcW, srcH, dx, dy, drawW, drawH);
+
+          // Draw live animated trains, buses, taxis, elevators, escalators, and commuters on top!
+          const scaleFactor = Math.max(0.75, Math.min(1.8, drawW / 1280));
+          drawBlueprintLiveOverlays(ctx, bp.viewId, dx, dy, drawW, drawH, nowSec, scaleFactor);
+        } else {
+          // Fallback while image loads
+          drawProceduralLevel(ctx, activeView, w, h, nowSec);
         }
       }
 
-      // D. PRESS-SHOP (Iconic Crimson-Red Kiosk Pavilion at v = 2.4 to 5.4, u = 2.8 to 5.8)
-      drawPrism(
-        2.8,
-        5.8,
-        2.4,
-        5.4,
-        zBridgeTop,
-        zBridgeTop + 44,
-        cx,
-        cy,
-        camZoom,
-        '#991b1b',
-        '#fef2f2', // Bright interior book/magazine alcove
-        '#b91c1c',
-        '#1c1917',
-        1.2
-      );
-      // Checkout counter inside Press-shop with clerk
-      drawPrism(
-        2.6,
-        3.5,
-        3.0,
-        4.9,
-        zBridgeTop,
-        zBridgeTop + 15,
-        cx,
-        cy,
-        camZoom,
-        '#d97706',
-        '#b45309',
-        '#92400e',
-        '#1c1917',
-        0.9
-      );
-      // Red roof fascia overhang
-      drawPrism(
-        2.5,
-        5.9,
-        2.2,
-        5.6,
-        zBridgeTop + 34,
-        zBridgeTop + 46,
-        cx,
-        cy,
-        camZoom,
-        '#7f1d1d',
-        '#dc2626',
-        '#991b1b',
-        '#1c1917',
-        1.1
-      );
-      if (labelsOn) {
-        const prsPt = projectIso(2.5, 3.9, zBridgeTop + 39, cx, cy, camZoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(11 * camZoom)}px "Plus Jakarta Sans", sans-serif`;
-        ctx.fillStyle = '#ffffff';
-        ctx.textAlign = 'center';
-        ctx.fillText('Press-shop', prsPt.sx, prsPt.sy);
-        ctx.restore();
-      }
-
-      // E. APOTHEKE / BIO-MARKT (Green Storefront beside Press-shop at v = 5.6 to 7.8)
-      drawPrism(
-        3.8,
-        6.5,
-        5.6,
-        7.8,
-        zBridgeTop,
-        zBridgeTop + 40,
-        cx,
-        cy,
-        camZoom,
-        '#065f46',
-        '#d1fae5',
-        '#059669',
-        '#064e3b',
-        1.1
-      );
-      if (labelsOn) {
-        const apoPt = projectIso(3.8, 6.7, zBridgeTop + 34, cx, cy, camZoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(10 * camZoom)}px "Plus Jakarta Sans", sans-serif`;
-        ctx.fillStyle = '#6ee7b7';
-        ctx.textAlign = 'center';
-        ctx.fillText('Apotheke', apoPt.sx, apoPt.sy);
-        ctx.restore();
-      }
-
-      // F. TOWERING TRANSPARENT GLASS ELEVATOR SHAFTS (Glasaufzüge)
-      const elevatorShafts = [
-        { u: 3.1, v: -6.2, zBot: zBridgeTop, zTop: zBridgeTop + 125 },
-        { u: 3.2, v: 0.9, zBot: zBridgeTop, zTop: zBridgeTop + 108 },
-      ];
-      for (let idx = 0; idx < elevatorShafts.length; idx++) {
-        const el = elevatorShafts[idx];
-        // Moving elevator cabin inside shaft
-        const cabinZ =
-          el.zBot +
-          12 +
-          (Math.sin(now * 0.0014 + idx * 2.1) * 0.5 + 0.5) * (el.zTop - el.zBot - 38);
-        drawPrism(
-          el.u - 0.48,
-          el.u + 0.48,
-          el.v - 0.48,
-          el.v + 0.48,
-          cabinZ,
-          cabinZ + 22,
-          cx,
-          cy,
-          camZoom,
-          '#cbd5e1',
-          '#fde68a',
-          '#94a3b8',
-          '#334155',
-          1.0
-        );
-
-        // Translucent laminated glass shaft walls
-        drawPrism(
-          el.u - 0.62,
-          el.u + 0.62,
-          el.v - 0.62,
-          el.v + 0.62,
-          el.zBot,
-          el.zTop,
-          cx,
-          cy,
-          camZoom,
-          'rgba(186, 230, 253, 0.38)',
-          'rgba(148, 197, 235, 0.26)',
-          'rgba(125, 211, 252, 0.22)',
-          'rgba(71, 85, 105, 0.85)',
-          1.3
-        );
-      }
-
-      // Render Commuters Strolling on the Elevated Concourse Bridge
-      for (let i = 0; i < 10; i++) {
-        const npc = npcs[(i + 7) % npcs.length];
-        const vBridge = ((npc.wy * 1.4 + i * 1.9) % 16) - 7.5;
-        drawRealisticCommuter(
-          1.6 + (i % 3) * 0.55,
-          vBridge,
-          zBridgeTop,
-          npc.coatColor,
-          '#0f172a',
-          npc.walkPhase + now * 0.004,
-          npc.hasLuggage,
-          cx,
-          cy,
-          camZoom
-        );
-      }
-
-      // ======================================================================
-      // 6. FOREGROUND MONUMENTAL 3D STEEL H-BEAM COLUMNS & OVERHEAD GIRDER GRID
-      // (Directly matching the foreground steel framework in the reference art!)
-      // ======================================================================
-      const columns = [
-        { u: -7.5, v: -6.5 },
-        { u: -3.2, v: -6.5 },
-        { u: -5.2, v: -1.8 },
-        { u: -6.5, v: 2.8 },
-        { u: -1.8, v: 2.8 },
-        { u: 7.5, v: -1.8 },
-        { u: 2.2, v: 8.8 },
-      ];
-      const zGirderTop = 215;
-
-      for (const col of columns) {
-        // Warm golden architectural uplight at column base
-        const basePt = projectIso(col.u, col.v, 16, cx, cy, camZoom);
-        const upGlow = ctx.createRadialGradient(
-          basePt.sx,
-          basePt.sy,
-          2,
-          basePt.sx,
-          basePt.sy - 14 * camZoom,
-          36 * camZoom
-        );
-        upGlow.addColorStop(0, 'rgba(254, 243, 199, 0.85)');
-        upGlow.addColorStop(0.5, 'rgba(245, 158, 11, 0.28)');
-        upGlow.addColorStop(1, 'rgba(245, 158, 11, 0)');
-        ctx.fillStyle = upGlow;
-        ctx.beginPath();
-        ctx.arc(basePt.sx, basePt.sy - 10 * camZoom, 36 * camZoom, 0, Math.PI * 2);
-        ctx.fill();
-
-        // 3D Isometric Steel Column Shaft
-        drawPrism(
-          col.u - 0.34,
-          col.u + 0.34,
-          col.v - 0.34,
-          col.v + 0.34,
-          16,
-          zGirderTop,
-          cx,
-          cy,
-          camZoom,
-          '#64748b',
-          '#475569',
-          '#334155',
-          '#1e293b',
-          1.2
-        );
-      }
-
-      // 3D Isometric Overhead Steel Girder Beams connecting the columns
-      // Beams running along `u`
-      for (const gv of [-6.5, -1.8, 2.8]) {
-        drawPrism(
-          -10.5,
-          9.5,
-          gv - 0.32,
-          gv + 0.32,
-          zGirderTop - 12,
-          zGirderTop,
-          cx,
-          cy,
-          camZoom,
-          '#64748b',
-          '#475569',
-          '#334155',
-          '#1e293b',
-          1.1
-        );
-      }
-      // Cross-beams running along `v`
-      for (const gu of [-6.5, -2.2, 7.5]) {
-        drawPrism(
-          gu - 0.32,
-          gu + 0.32,
-          -9.5,
-          6.5,
-          zGirderTop - 12,
-          zGirderTop,
-          cx,
-          cy,
-          camZoom,
-          '#64748b',
-          '#475569',
-          '#334155',
-          '#1e293b',
-          1.1
-        );
-      }
-
-      // Diegetic Storefront Signage Badges (rendered on top of geometry so never occluded)
-      const shopSigns = [
-        { u: 4.1, v: -4.0, z: zBridgeTop + 40, text: 'Bakeral', bg: '#78350f', fg: '#fde68a' },
-        { u: 4.1, v: -1.25, z: zBridgeTop + 40, text: 'Bank · DB', bg: '#1e3a8a', fg: '#ffffff' },
-        { u: 2.6, v: 3.9, z: zBridgeTop + 42, text: 'Press-shop', bg: '#991b1b', fg: '#ffffff' },
-        { u: 3.8, v: 6.7, z: zBridgeTop + 36, text: 'Apotheke', bg: '#065f46', fg: '#a7f3d0' },
-      ];
-      for (const s of shopSigns) {
-        const pt = projectIso(s.u, s.v, s.z, cx, cy, camZoom);
-        ctx.save();
-        ctx.font = `700 ${Math.round(10 * camZoom)}px "Plus Jakarta Sans", sans-serif`;
-        const tw = ctx.measureText(s.text).width + 10 * camZoom;
-        const th = 15 * camZoom;
-        ctx.fillStyle = s.bg;
-        ctx.strokeStyle = 'rgba(15, 23, 42, 0.85)';
-        ctx.lineWidth = 1;
-        ctx.fillRect(pt.sx - tw * 0.5, pt.sy - th * 0.5, tw, th);
-        ctx.strokeRect(pt.sx - tw * 0.5, pt.sy - th * 0.5, tw, th);
-        ctx.fillStyle = s.fg;
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(s.text, pt.sx, pt.sy);
-        ctx.restore();
-      }
-
-      ctx.restore();
-      scheduleNextFrame();
+      timerId = window.setTimeout(() => {
+        renderFrame(performance.now());
+      }, 32);
     };
 
     renderFrame(performance.now());
 
     return () => {
-      isDisposed = true;
-      window.clearTimeout(timerId);
-      resizeObserver.disconnect();
-      canvas.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      canvas.removeEventListener('wheel', handleWheel);
+      if (timerId !== null) window.clearTimeout(timerId);
+      window.removeEventListener('resize', handleResize);
     };
-  }, []);
+  }, [activeView, renderStyle, useAltE0Variant, simSpeed, showLabels]);
+
+  // Mouse drag pan & wheel zoom handlers (plus click-to-select in 6-level grid mode)
+  const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (renderStyle === 'all_levels_grid' && onSelectView && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const topPad = Math.max(48, rect.height * 0.065);
+      const cols = 3;
+      const rows = 2;
+      const col = Math.floor((mx / rect.width) * cols);
+      const row = Math.floor(((my - topPad) / (rect.height - topPad)) * rows);
+      const idx = row * cols + col;
+      if (idx >= 0 && idx < STATION_BLUEPRINTS.length) {
+        onSelectView(STATION_BLUEPRINTS[idx].viewId);
+      }
+      return;
+    }
+
+    dragRef.current = {
+      active: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: panRef.current.x,
+      origY: panRef.current.y,
+    };
+  };
+
+  const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!dragRef.current.active) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    panRef.current = {
+      x: dragRef.current.origX + (e.clientX - dragRef.current.startX) * dpr,
+      y: dragRef.current.origY + (e.clientY - dragRef.current.startY) * dpr,
+    };
+  };
+
+  const handleMouseUp = () => {
+    dragRef.current.active = false;
+  };
+
+  const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    if (renderStyle === 'all_levels_grid') return;
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    zoomRef.current = Math.max(0.65, Math.min(2.6, zoomRef.current * factor));
+  };
 
   return (
-    <div
-      ref={containerRef}
-      className="fixed inset-0 w-full h-full overflow-hidden select-none bg-zinc-900"
-    >
-      <canvas
-        ref={canvasRef}
-        data-testid="realistic-station-canvas"
-        className="block w-full h-full cursor-grab active:cursor-grabbing"
-      />
-    </div>
+    <canvas
+      ref={canvasRef}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onMouseLeave={handleMouseUp}
+      onWheel={handleWheel}
+      className="block w-full h-full cursor-grab active:cursor-grabbing select-none"
+    />
   );
 };
