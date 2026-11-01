@@ -1,38 +1,46 @@
-import React, { useEffect, useRef } from 'react';
-import {
-  STATION_BLUEPRINTS,
-  StationLevelId,
-  StationViewId,
-} from '../game/stationData';
+import React, { useEffect, useMemo, useRef } from 'react';
+import { StationLevelId, StationViewId } from '../game/stationData';
 import {
   ScheduledTrain,
   NpcAgent,
   stepTrainTimetable,
   stepNpcAgent,
 } from '../game/rules';
+import { Camera } from '../engine/camera';
+import { atmosphereForMinutes } from '../engine/atmosphere';
+import { AssetTier, RenderQuality, SceneDef, VenueDef } from '../engine/types';
+import { getBakedPlate, isReady, loadImage, resolvePlate } from '../engine/assets';
+import { drawScenePlate } from '../engine/render/plate';
+import {
+  drawCommuter,
+  drawIsoBox,
+  drawIsoCylinder,
+  drawIsometricGrid,
+  drawVehicle,
+  VehicleStyle,
+} from '../engine/render/primitives';
 
 export type RenderStyleMode = 'reference_live' | 'procedural_iso' | 'all_levels_grid';
 
 interface RealisticStationCanvasProps {
+  /** The venue being rendered — all geometry, art and crowd come from here. */
+  venue: VenueDef;
   activeView: StationViewId;
   renderStyle: RenderStyleMode;
   useAltE0Variant: boolean;
   simSpeed: number;
   showLabels: boolean;
+  renderQuality: RenderQuality;
+  assetTier: AssetTier;
   trainsRef: React.MutableRefObject<ScheduledTrain[]>;
   npcsRef: React.MutableRefObject<NpcAgent[]>;
   stationMinutesRef: React.MutableRefObject<number>;
   onSelectView?: (view: StationViewId) => void;
 }
 
-interface Point2D {
-  x: number;
-  y: number;
-}
-
 interface AmbientWalker {
   id: number;
-  viewId: StationViewId;
+  sceneId: string;
   path: { x: number; y: number }[];
   segIndex: number;
   segProgress: number;
@@ -45,94 +53,56 @@ interface AmbientWalker {
   label?: string;
 }
 
-// Normalized coordinates (0..1) relative to the 16:9 reference blueprint image
-// for ambient commuters, shoppers, and staff on each of the 6 views
-function createBlueprintWalkers(): AmbientWalker[] {
+/**
+ * Build the ambient crowd from the scene data of a venue.
+ * Any venue that declares `crowd` routes gets living walkways — the renderer
+ * no longer knows anything about specific stations.
+ */
+function buildWalkers(scenes: SceneDef[]): AmbientWalker[] {
   const walkers: AmbientWalker[] = [];
   let idCounter = 1;
 
-  const addWalker = (
-    viewId: StationViewId,
-    path: { x: number; y: number }[],
-    speed: number,
-    coatColor: string,
-    hasSuitcase: boolean,
-    label?: string
-  ) => {
-    walkers.push({
-      id: idCounter++,
-      viewId,
-      path,
-      segIndex: idCounter % Math.max(1, path.length - 1),
-      segProgress: (idCounter * 0.27) % 1,
-      speed,
-      dir: idCounter % 2 === 0 ? 1 : -1,
-      coatColor,
-      hairColor: idCounter % 3 === 0 ? '#fde047' : idCounter % 2 === 0 ? '#451a03' : '#1e293b',
-      hasSuitcase,
-      suitcaseColor: idCounter % 2 === 0 ? '#dc2626' : '#0284c7',
-      label,
-    });
-  };
-
-  // E+2: Upper platforms & SE entrance concourse
-  addWalker('E+2', [{ x: 0.16, y: 0.56 }, { x: 0.48, y: 0.78 }, { x: 0.68, y: 0.90 }], 0.045, '#1e293b', true, 'ICE 948');
-  addWalker('E+2', [{ x: 0.28, y: 0.42 }, { x: 0.56, y: 0.62 }, { x: 0.78, y: 0.77 }], 0.052, '#b91c1c', false, 'S7');
-  addWalker('E+2', [{ x: 0.44, y: 0.26 }, { x: 0.66, y: 0.42 }, { x: 0.84, y: 0.55 }], 0.038, '#0284c7', true);
-  addWalker('E+2', [{ x: 0.60, y: 0.72 }, { x: 0.74, y: 0.83 }, { x: 0.82, y: 0.89 }], 0.048, '#059669', false);
-  addWalker('E+2', [{ x: 0.34, y: 0.64 }, { x: 0.52, y: 0.52 }, { x: 0.64, y: 0.43 }], 0.041, '#d97706', true, 'RE 1');
-
-  // E+1: Gallery walkways, 2 DB Red Rondells, and Bügelbauten offices
-  addWalker('E+1', [{ x: 0.23, y: 0.26 }, { x: 0.36, y: 0.36 }, { x: 0.46, y: 0.45 }], 0.042, '#dc2626', false, 'DB Info');
-  addWalker('E+1', [{ x: 0.32, y: 0.47 }, { x: 0.40, y: 0.56 }, { x: 0.52, y: 0.67 }], 0.039, '#1e40af', true, 'DB Lounge');
-  addWalker('E+1', [{ x: 0.52, y: 0.28 }, { x: 0.66, y: 0.38 }, { x: 0.76, y: 0.46 }], 0.046, '#047857', false, 'Bügelbauten');
-  addWalker('E+1', [{ x: 0.38, y: 0.62 }, { x: 0.55, y: 0.74 }, { x: 0.72, y: 0.84 }], 0.044, '#7c2d12', true);
-  addWalker('E+1', [{ x: 0.25, y: 0.58 }, { x: 0.36, y: 0.50 }, { x: 0.48, y: 0.40 }], 0.036, '#4338ca', false);
-
-  // E0: Ground floor between Europaplatz (NW), Red Rondells, Cafes, and Washingtonplatz (SE)
-  addWalker('E0', [{ x: 0.14, y: 0.24 }, { x: 0.28, y: 0.35 }, { x: 0.38, y: 0.43 }], 0.044, '#0284c7', true, 'Europaplatz');
-  addWalker('E0', [{ x: 0.36, y: 0.43 }, { x: 0.44, y: 0.56 }, { x: 0.58, y: 0.68 }, { x: 0.82, y: 0.85 }], 0.048, '#b91c1c', true, 'Taxi');
-  addWalker('E0', [{ x: 0.52, y: 0.28 }, { x: 0.64, y: 0.37 }, { x: 0.72, y: 0.43 }], 0.037, '#d97706', false, 'Bakeral');
-  addWalker('E0', [{ x: 0.22, y: 0.60 }, { x: 0.32, y: 0.53 }, { x: 0.42, y: 0.60 }], 0.035, '#059669', false, 'Café');
-  addWalker('E0', [{ x: 0.86, y: 0.88 }, { x: 0.74, y: 0.78 }, { x: 0.60, y: 0.68 }], 0.046, '#1e293b', true, 'ICE 1001');
-
-  // E-1: Supermarket (NW), Pharmacy, Central Atrium, and U-Bahn U5 transfer corridor (NE)
-  addWalker('E-1', [{ x: 0.22, y: 0.24 }, { x: 0.31, y: 0.32 }, { x: 0.38, y: 0.39 }], 0.038, '#16a34a', false, 'Supermarkt');
-  addWalker('E-1', [{ x: 0.38, y: 0.42 }, { x: 0.52, y: 0.32 }, { x: 0.69, y: 0.24 }, { x: 0.79, y: 0.17 }], 0.052, '#2563eb', true, 'Zur U5');
-  addWalker('E-1', [{ x: 0.33, y: 0.54 }, { x: 0.44, y: 0.64 }, { x: 0.58, y: 0.74 }], 0.041, '#dc2626', false, 'Apotheke');
-  addWalker('E-1', [{ x: 0.56, y: 0.68 }, { x: 0.66, y: 0.58 }, { x: 0.75, y: 0.50 }], 0.039, '#d97706', false, 'Asia Bistro');
-  addWalker('E-1', [{ x: 0.46, y: 0.74 }, { x: 0.58, y: 0.82 }, { x: 0.68, y: 0.74 }], 0.043, '#475569', true);
-
-  // E-2: Deep underground platforms (Tracks 1-8) and U-Bahn U5 platform on the right
-  addWalker('E-2', [{ x: 0.22, y: 0.48 }, { x: 0.40, y: 0.62 }, { x: 0.56, y: 0.74 }], 0.046, '#1e293b', true, 'ICE 1001');
-  addWalker('E-2', [{ x: 0.34, y: 0.36 }, { x: 0.48, y: 0.48 }, { x: 0.64, y: 0.60 }], 0.042, '#dc2626', true, 'RE 3');
-  addWalker('E-2', [{ x: 0.48, y: 0.24 }, { x: 0.65, y: 0.38 }, { x: 0.78, y: 0.48 }], 0.049, '#0284c7', true, 'ICE 592');
-  addWalker('E-2', [{ x: 0.66, y: 0.72 }, { x: 0.77, y: 0.62 }, { x: 0.87, y: 0.53 }], 0.050, '#eab308', false, 'U5 Hönow');
-
-  // CUTAWAY: Multi-level cross-section
-  addWalker('CUTAWAY', [{ x: 0.44, y: 0.36 }, { x: 0.56, y: 0.44 }, { x: 0.70, y: 0.53 }], 0.042, '#dc2626', true, 'Bakeral');
-  addWalker('CUTAWAY', [{ x: 0.22, y: 0.62 }, { x: 0.36, y: 0.50 }, { x: 0.46, y: 0.43 }], 0.045, '#0284c7', true, 'ICE 1001');
-  addWalker('CUTAWAY', [{ x: 0.52, y: 0.68 }, { x: 0.66, y: 0.56 }, { x: 0.78, y: 0.46 }], 0.048, '#16a34a', false, 'RE 3');
+  for (const scene of scenes) {
+    for (const route of scene.crowd) {
+      walkers.push({
+        id: idCounter,
+        sceneId: scene.id,
+        path: route.path,
+        segIndex: idCounter % Math.max(1, route.path.length - 1),
+        segProgress: (idCounter * 0.27) % 1,
+        speed: route.speed,
+        dir: idCounter % 2 === 0 ? 1 : -1,
+        coatColor: route.coat,
+        hairColor: idCounter % 3 === 0 ? '#fde047' : idCounter % 2 === 0 ? '#451a03' : '#1e293b',
+        hasSuitcase: route.hasSuitcase,
+        suitcaseColor: idCounter % 2 === 0 ? '#dc2626' : '#0284c7',
+        label: route.label,
+      });
+      idCounter++;
+    }
+  }
 
   return walkers;
 }
 
+
 export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
+  venue,
   activeView,
   renderStyle,
   useAltE0Variant,
   simSpeed,
   showLabels,
+  renderQuality,
+  assetTier,
   trainsRef,
   npcsRef,
   stationMinutesRef,
   onSelectView,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const imagesRef = useRef<Record<string, HTMLImageElement>>({});
-  const walkersRef = useRef<AmbientWalker[]>(createBlueprintWalkers());
-  const panRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-  const zoomRef = useRef<number>(1.0);
+  const cameraRef = useRef<Camera>(new Camera());
+  const walkersRef = useRef<AmbientWalker[]>(buildWalkers(venue.scenes));
   const dragRef = useRef<{ active: boolean; startX: number; startY: number; origX: number; origY: number }>({
     active: false,
     startX: 0,
@@ -141,26 +111,27 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
     origY: 0,
   });
 
-  // Preload all reference images
-  useEffect(() => {
-    const urls = new Set<string>();
-    for (const bp of STATION_BLUEPRINTS) {
-      urls.add(bp.referenceImage);
-      if (bp.altReferenceImage) urls.add(bp.altReferenceImage);
-    }
-    urls.forEach((url) => {
-      if (!imagesRef.current[url]) {
-        const img = new Image();
-        img.src = url;
-        imagesRef.current[url] = img;
-      }
-    });
-  }, []);
+  const scenes = venue.scenes;
+  const activeScene = useMemo(
+    () => scenes.find((s) => s.id === activeView) ?? scenes[0],
+    [scenes, activeView]
+  );
 
-  // Reset pan/zoom when view changes
+  // Preload every plate of the venue (all art tiers, all variants).
   useEffect(() => {
-    panRef.current = { x: 0, y: 0 };
-    zoomRef.current = 1.0;
+    for (const scene of venue.scenes) {
+      for (const plate of scene.plates) loadImage(plate.src);
+    }
+  }, [venue]);
+
+  // A different venue means a different crowd.
+  useEffect(() => {
+    walkersRef.current = buildWalkers(venue.scenes);
+  }, [venue]);
+
+  // Reset pan/zoom when the view changes
+  useEffect(() => {
+    cameraRef.current.reset();
   }, [activeView, renderStyle]);
 
   useEffect(() => {
@@ -182,149 +153,8 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
     handleResize();
     window.addEventListener('resize', handleResize);
 
-    // Draw the exact 2:1 isometric slate-grey engineering grid from the reference images
-    const drawIsometricEngineeringGrid = (
-      c: CanvasRenderingContext2D,
-      w: number,
-      h: number,
-      tileW: number = 36
-    ) => {
-      c.fillStyle = '#3b4049';
-      c.fillRect(0, 0, w, h);
-
-      const tileH = tileW * 0.5;
-      c.strokeStyle = '#2e323b';
-      c.lineWidth = 1;
-      c.beginPath();
-
-      const diagSpan = Math.ceil((w + h * 2) / tileW) + 8;
-      for (let i = -diagSpan; i <= diagSpan; i++) {
-        // NW -> SE lines (slope +0.5)
-        const startX1 = i * tileW;
-        c.moveTo(startX1, 0);
-        c.lineTo(startX1 + h * 2, h);
-
-        // NE -> SW lines (slope -0.5)
-        const startX2 = i * tileW;
-        c.moveTo(startX2, 0);
-        c.lineTo(startX2 - h * 2, h);
-      }
-      c.stroke();
-    };
-
-    // Draw an isometric prism block (used in procedural architecture mode & live vehicles)
-    const drawIsoBox = (
-      c: CanvasRenderingContext2D,
-      cx: number,
-      cy: number,
-      wIso: number,
-      dIso: number,
-      hPx: number,
-      topColor: string,
-      leftColor: string,
-      rightColor: string,
-      strokeColor: string = '#1e2229'
-    ) => {
-      // 4 top corners in isometric screen space
-      const pTop = { x: cx, y: cy - hPx };
-      const pRight = { x: cx + wIso, y: cy + wIso * 0.5 - hPx };
-      const pBottom = { x: cx + wIso - dIso, y: cy + (wIso + dIso) * 0.5 - hPx };
-      const pLeft = { x: cx - dIso, y: cy + dIso * 0.5 - hPx };
-
-      // Left face
-      c.fillStyle = leftColor;
-      c.beginPath();
-      c.moveTo(pLeft.x, pLeft.y);
-      c.lineTo(pBottom.x, pBottom.y);
-      c.lineTo(pBottom.x, pBottom.y + hPx);
-      c.lineTo(pLeft.x, pLeft.y + hPx);
-      c.closePath();
-      c.fill();
-      c.strokeStyle = strokeColor;
-      c.lineWidth = 1;
-      c.stroke();
-
-      // Right face
-      c.fillStyle = rightColor;
-      c.beginPath();
-      c.moveTo(pBottom.x, pBottom.y);
-      c.lineTo(pRight.x, pRight.y);
-      c.lineTo(pRight.x, pRight.y + hPx);
-      c.lineTo(pBottom.x, pBottom.y + hPx);
-      c.closePath();
-      c.fill();
-      c.stroke();
-
-      // Top face
-      c.fillStyle = topColor;
-      c.beginPath();
-      c.moveTo(pTop.x, pTop.y);
-      c.lineTo(pRight.x, pRight.y);
-      c.lineTo(pBottom.x, pBottom.y);
-      c.lineTo(pLeft.x, pLeft.y);
-      c.closePath();
-      c.fill();
-      c.stroke();
-    };
-
-    // Draw a circular cylinder in isometric space (for the iconic red DB Info Rondells & Revolving Doors)
-    const drawIsoCylinder = (
-      c: CanvasRenderingContext2D,
-      cx: number,
-      cy: number,
-      rx: number,
-      ry: number,
-      hPx: number,
-      topColor: string,
-      bodyColor: string,
-      bandColor?: string,
-      label?: string
-    ) => {
-      // Shadow
-      c.fillStyle = 'rgba(0,0,0,0.28)';
-      c.beginPath();
-      c.ellipse(cx + 3, cy + 4, rx * 1.04, ry * 1.04, 0, 0, Math.PI * 2);
-      c.fill();
-
-      // Cylinder body
-      c.fillStyle = bodyColor;
-      c.beginPath();
-      c.ellipse(cx, cy, rx, ry, 0, 0, Math.PI);
-      c.lineTo(cx - rx, cy - hPx);
-      c.ellipse(cx, cy - hPx, rx, ry, 0, Math.PI, 0, true);
-      c.closePath();
-      c.fill();
-      c.strokeStyle = '#1e2229';
-      c.lineWidth = 1.2;
-      c.stroke();
-
-      // Optional mid window/stripe band
-      if (bandColor) {
-        c.fillStyle = bandColor;
-        c.beginPath();
-        c.ellipse(cx, cy - hPx * 0.35, rx * 0.99, ry * 0.99, 0, 0, Math.PI);
-        c.lineTo(cx - rx * 0.99, cy - hPx * 0.72);
-        c.ellipse(cx, cy - hPx * 0.72, rx * 0.99, ry * 0.99, 0, Math.PI, 0, true);
-        c.closePath();
-        c.fill();
-      }
-
-      // Cylinder roof
-      c.fillStyle = topColor;
-      c.beginPath();
-      c.ellipse(cx, cy - hPx, rx * 1.05, ry * 1.05, 0, 0, Math.PI * 2);
-      c.fill();
-      c.stroke();
-
-      if (label) {
-        c.fillStyle = '#ffffff';
-        c.font = 'bold 9px sans-serif';
-        c.textAlign = 'center';
-        c.fillText(label, cx, cy - hPx + 3);
-      }
-    };
-
-    // Draw an animated isometric train or vehicle along a screen-space vector
+    // Thin bindings over the shared engine primitives so the station visuals
+    // keep their exact call signature while living in engine/render/primitives.
     const drawLiveIsoTrain = (
       c: CanvasRenderingContext2D,
       x1: number,
@@ -333,160 +163,11 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
       y2: number,
       thickness: number,
       height: number,
-      style: 'ICE' | 'REGIO' | 'UBAHN_U5' | 'BVG_BUS' | 'TAXI',
+      style: VehicleStyle,
       label: string,
       nowSec: number
-    ) => {
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const len = Math.hypot(dx, dy);
-      if (len < 4) return;
+    ) => drawVehicle(c, x1, y1, x2, y2, thickness, height, style, label, nowSec, showLabels);
 
-      // Normal vector pointing "up-right" in screen space for isometric thickness
-      const nx = -dy / len;
-      const ny = dx / len;
-      const wx = nx * thickness;
-      const wy = ny * thickness * 0.65;
-
-      let bodyFill = '#f1f5f9';
-      let roofFill = '#e2e8f0';
-      let stripeFill = '#dc2626';
-      let windowFill = '#1e293b';
-
-      if (style === 'REGIO') {
-        bodyFill = '#c83e3b';
-        roofFill = '#94a3b8';
-        stripeFill = '#f8fafc';
-      } else if (style === 'UBAHN_U5') {
-        bodyFill = '#eab308';
-        roofFill = '#ca8a04';
-        stripeFill = '#1e293b';
-      } else if (style === 'BVG_BUS') {
-        bodyFill = '#facc15';
-        roofFill = '#fef08a';
-        stripeFill = '#334155';
-      } else if (style === 'TAXI') {
-        bodyFill = '#fde047';
-        roofFill = '#facc15';
-        stripeFill = '#1e293b';
-      }
-
-      // Drop shadow
-      c.fillStyle = 'rgba(0, 0, 0, 0.32)';
-      c.beginPath();
-      c.moveTo(x1 + 3, y1 + 5);
-      c.lineTo(x2 + 3, y2 + 5);
-      c.lineTo(x2 + wx + 3, y2 + wy + 5);
-      c.lineTo(x1 + wx + 3, y1 + wy + 5);
-      c.closePath();
-      c.fill();
-
-      // Side face
-      c.fillStyle = bodyFill;
-      c.beginPath();
-      c.moveTo(x1, y1);
-      c.lineTo(x2, y2);
-      c.lineTo(x2, y2 - height);
-      c.lineTo(x1, y1 - height);
-      c.closePath();
-      c.fill();
-      c.strokeStyle = '#1e2229';
-      c.lineWidth = 1.2;
-      c.stroke();
-
-      // Stripe along side face
-      c.fillStyle = stripeFill;
-      c.beginPath();
-      c.moveTo(x1, y1 - height * 0.32);
-      c.lineTo(x2, y2 - height * 0.32);
-      c.lineTo(x2, y2 - height * 0.48);
-      c.lineTo(x1, y1 - height * 0.48);
-      c.closePath();
-      c.fill();
-
-      // Windows along side face
-      const segments = style === 'TAXI' ? 2 : style === 'BVG_BUS' ? 4 : 8;
-      for (let i = 0; i < segments; i++) {
-        const tA = (i + 0.18) / segments;
-        const tB = (i + 0.78) / segments;
-        const sxA = x1 + dx * tA;
-        const syA = y1 + dy * tA;
-        const sxB = x1 + dx * tB;
-        const syB = y1 + dy * tB;
-
-        c.fillStyle = i % 2 === 0 ? windowFill : '#334155';
-        c.beginPath();
-        c.moveTo(sxA, syA - height * 0.52);
-        c.lineTo(sxB, syB - height * 0.52);
-        c.lineTo(sxB, syB - height * 0.82);
-        c.lineTo(sxA, syA - height * 0.82);
-        c.closePath();
-        c.fill();
-      }
-
-      // Front nose face
-      c.fillStyle = bodyFill;
-      c.beginPath();
-      c.moveTo(x1, y1);
-      c.lineTo(x1 + wx, y1 + wy);
-      c.lineTo(x1 + wx, y1 + wy - height);
-      c.lineTo(x1, y1 - height);
-      c.closePath();
-      c.fill();
-      c.stroke();
-
-      // Windshield on front face
-      c.fillStyle = '#0f172a';
-      c.beginPath();
-      c.moveTo(x1 + wx * 0.15, y1 + wy * 0.15 - height * 0.48);
-      c.lineTo(x1 + wx * 0.85, y1 + wy * 0.85 - height * 0.48);
-      c.lineTo(x1 + wx * 0.85, y1 + wy * 0.85 - height * 0.84);
-      c.lineTo(x1 + wx * 0.15, y1 + wy * 0.15 - height * 0.84);
-      c.closePath();
-      c.fill();
-
-      // Warm glowing headlights
-      const glow = 0.65 + 0.35 * Math.sin(nowSec * 5);
-      c.fillStyle = `rgba(254, 240, 138, ${glow})`;
-      c.beginPath();
-      c.arc(x1 + wx * 0.25, y1 + wy * 0.25 - height * 0.24, 2.5, 0, Math.PI * 2);
-      c.arc(x1 + wx * 0.75, y1 + wy * 0.75 - height * 0.24, 2.5, 0, Math.PI * 2);
-      c.fill();
-
-      // Roof face
-      c.fillStyle = roofFill;
-      c.beginPath();
-      c.moveTo(x1, y1 - height);
-      c.lineTo(x2, y2 - height);
-      c.lineTo(x2 + wx, y2 + wy - height);
-      c.lineTo(x1 + wx, y1 + wy - height);
-      c.closePath();
-      c.fill();
-      c.stroke();
-
-      // Label badge if enabled
-      if (showLabels && label) {
-        const midX = (x1 + x2) * 0.5 + wx * 0.5;
-        const midY = (y1 + y2) * 0.5 + wy * 0.5 - height - 8;
-        c.font = 'bold 10px monospace';
-        const tw = c.measureText(label).width + 10;
-        c.fillStyle = 'rgba(15, 23, 42, 0.86)';
-        c.fillRect(midX - tw * 0.5, midY - 9, tw, 14);
-        c.strokeStyle =
-          style === 'UBAHN_U5' || style === 'BVG_BUS' || style === 'TAXI'
-            ? '#facc15'
-            : style === 'REGIO'
-              ? '#ef4444'
-              : '#38bdf8';
-        c.lineWidth = 1;
-        c.strokeRect(midX - tw * 0.5, midY - 9, tw, 14);
-        c.fillStyle = '#f8fafc';
-        c.textAlign = 'center';
-        c.fillText(label, midX, midY + 1);
-      }
-    };
-
-    // Draw an animated isometric commuter sprite
     const drawCommuterSprite = (
       c: CanvasRenderingContext2D,
       x: number,
@@ -498,68 +179,8 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
       suitcaseColor: string,
       walkPhase: number,
       label?: string
-    ) => {
-      const bob = Math.abs(Math.sin(walkPhase)) * 1.8 * scale;
-      const legSwing = Math.sin(walkPhase) * 2.5 * scale;
+    ) => drawCommuter(c, x, y, scale, coatColor, hairColor, hasSuitcase, suitcaseColor, walkPhase, label, showLabels);
 
-      // Ground shadow
-      c.fillStyle = 'rgba(0, 0, 0, 0.35)';
-      c.beginPath();
-      c.ellipse(x, y + 1, 4.5 * scale, 2.2 * scale, 0, 0, Math.PI * 2);
-      c.fill();
-
-      // Legs
-      c.strokeStyle = '#0f172a';
-      c.lineWidth = 1.8 * scale;
-      c.beginPath();
-      c.moveTo(x - 1.5 * scale, y - 5 * scale);
-      c.lineTo(x - 1.5 * scale + legSwing, y);
-      c.moveTo(x + 1.5 * scale, y - 5 * scale);
-      c.lineTo(x + 1.5 * scale - legSwing, y);
-      c.stroke();
-
-      // Rolling suitcase
-      if (hasSuitcase) {
-        c.fillStyle = suitcaseColor;
-        c.fillRect(x + 4 * scale, y - 6 * scale, 4.2 * scale, 5.5 * scale);
-        c.strokeStyle = '#0f172a';
-        c.lineWidth = 0.9 * scale;
-        c.strokeRect(x + 4 * scale, y - 6 * scale, 4.2 * scale, 5.5 * scale);
-      }
-
-      // Coat torso
-      c.fillStyle = coatColor;
-      c.beginPath();
-      c.roundRect(x - 3.4 * scale, y - 13 * scale - bob, 6.8 * scale, 8.5 * scale, 2 * scale);
-      c.fill();
-      c.strokeStyle = '#0f172a';
-      c.lineWidth = 0.9 * scale;
-      c.stroke();
-
-      // Head
-      c.fillStyle = '#fed7aa';
-      c.beginPath();
-      c.arc(x, y - 15.8 * scale - bob, 2.8 * scale, 0, Math.PI * 2);
-      c.fill();
-
-      // Hair / cap
-      c.fillStyle = hairColor;
-      c.beginPath();
-      c.arc(x, y - 16.6 * scale - bob, 2.8 * scale, Math.PI, 0);
-      c.fill();
-
-      if (showLabels && label) {
-        c.font = 'bold 9px monospace';
-        const w = c.measureText(label).width + 6;
-        c.fillStyle = 'rgba(15, 23, 42, 0.82)';
-        c.fillRect(x - w * 0.5, y - 28 * scale - bob, w, 11);
-        c.fillStyle = '#e2e8f0';
-        c.textAlign = 'center';
-        c.fillText(label, x, y - 20 * scale - bob);
-      }
-    };
-
-    // Draw live animated overlays calibrated to a reference blueprint rectangle (rx, ry, rw, rh)
     const drawBlueprintLiveOverlays = (
       c: CanvasRenderingContext2D,
       viewId: StationViewId,
@@ -817,9 +438,23 @@ export const RealisticStationCanvas: React.FC<RealisticStationCanvasProps> = ({
         }
       }
 
-      // 3. STEP AND DRAW AMBIENT WALKERS ON THIS BLUEPRINT VIEW
+    // Ambient crowd, driven by the active scene's crowd routes. Works for any
+    // venue, not just the station.
+    const drawCrowd = (
+      c: CanvasRenderingContext2D,
+      sceneId: string,
+      rx: number,
+      ry: number,
+      rw: number,
+      rh: number,
+      nowSec: number,
+      scaleFactor: number
+    ) => {
+      const px = (nx: number) => rx + nx * rw;
+      const py = (ny: number) => ry + ny * rh;
+
       for (const w of walkersRef.current) {
-        if (w.viewId !== viewId) continue;
+        if (w.sceneId !== sceneId) continue;
         const pA = w.path[w.segIndex];
         const pB = w.path[w.segIndex + 1] ?? w.path[0];
         const wx = px(pA.x + (pB.x - pA.x) * w.segProgress);
