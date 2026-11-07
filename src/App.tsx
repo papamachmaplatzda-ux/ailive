@@ -16,11 +16,15 @@ import {
   Image as ImageIcon,
   Tag,
   Train,
+  Building2,
+  Wand2,
 } from 'lucide-react';
-import {
-  STATION_BLUEPRINTS,
-  StationViewId,
-} from './game/stationData';
+import { StationViewId } from './game/stationData';
+import { BERLIN_CITY } from './world/berlinCity';
+import { entranceScene, getVenue } from './world/registry';
+import { AssetTier, RenderQuality, SceneDef } from './engine/types';
+import { resolvePlateInfo } from './engine/assets';
+import { CityMapCanvas } from './components/CityMapCanvas';
 import {
   createInitialTimetable,
   createInitialNpcs,
@@ -36,8 +40,11 @@ import {
 const REFERENCE_SWATCHES = ['#6c7077', '#535869', '#6585a5', '#8db3c7', '#c94a4a'];
 
 export default function App() {
+  const [venueId, setVenueId] = useState<string>(BERLIN_CITY.startVenueId);
+  const [view, setView] = useState<'city' | 'venue'>('venue');
   const [activeView, setActiveView] = useState<StationViewId>('E0');
   const [renderStyle, setRenderStyle] = useState<RenderStyleMode>('reference_live');
+  const [renderQuality, setRenderQuality] = useState<RenderQuality>('graded');
   const [useAltE0Variant, setUseAltE0Variant] = useState<boolean>(false);
   const [simSpeed, setSimSpeed] = useState<number>(1);
   const [showLabels, setShowLabels] = useState<boolean>(true);
@@ -48,8 +55,27 @@ export default function App() {
   const npcsRef = useRef<NpcAgent[]>(createInitialNpcs(trainsRef.current));
   const stationMinutesRef = useRef<number>(8 * 60 + 15);
 
-  const currentBlueprint =
-    STATION_BLUEPRINTS.find((b) => b.viewId === activeView) ?? STATION_BLUEPRINTS[2];
+  // The venue and its scenes come from the world model — the app knows nothing
+  // about a station's levels beyond what the data declares.
+  const venue = getVenue(venueId) ?? BERLIN_CITY.districts[0].venues[0];
+  const scenes: SceneDef[] = venue.scenes;
+  const currentScene: SceneDef =
+    scenes.find((s) => s.id === activeView) ?? scenes[0];
+
+  // Show which asset tier the engine resolved for the active scene.
+  const resolvedTier = currentScene
+    ? resolvePlateInfo(currentScene.plates, 'realistic', useAltE0Variant ? 'b' : undefined)
+    : null;
+
+  const enterVenue = (nextVenueId: string) => {
+    const next = getVenue(nextVenueId);
+    const scene = next ? entranceScene(next) : undefined;
+    if (!next || !scene) return;
+    setVenueId(next.id);
+    setActiveView(scene.id as StationViewId);
+    setRenderStyle('reference_live');
+    setView('venue');
+  };
 
   // Update displayed station clock periodically
   useEffect(() => {
@@ -103,20 +129,33 @@ export default function App() {
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#3b4049] text-slate-100 select-none">
       {/* Full-Viewport Isometric Canvas */}
-      <RealisticStationCanvas
-        activeView={activeView}
-        renderStyle={renderStyle}
-        useAltE0Variant={useAltE0Variant}
-        simSpeed={simSpeed}
-        showLabels={showLabels}
-        trainsRef={trainsRef}
-        npcsRef={npcsRef}
-        stationMinutesRef={stationMinutesRef}
-        onSelectView={(view) => {
-          setActiveView(view);
-          setRenderStyle('reference_live');
-        }}
-      />
+      {view === 'city' ? (
+        <CityMapCanvas
+          city={BERLIN_CITY}
+          renderQuality={renderQuality}
+          minutesRef={stationMinutesRef}
+          activeVenueId={venue.id}
+          onEnterVenue={enterVenue}
+        />
+      ) : (
+        <RealisticStationCanvas
+          venue={venue}
+          activeView={activeView}
+          renderStyle={renderStyle}
+          useAltE0Variant={useAltE0Variant}
+          simSpeed={simSpeed}
+          showLabels={showLabels}
+          renderQuality={renderQuality}
+          assetTier="realistic"
+          trainsRef={trainsRef}
+          npcsRef={npcsRef}
+          stationMinutesRef={stationMinutesRef}
+          onSelectView={(nextView) => {
+            setActiveView(nextView);
+            setRenderStyle('reference_live');
+          }}
+        />
+      )}
 
       {/* Top Reference Specification Bar matching the exact header of the uploaded tilemaps */}
       {!hideControls && (
@@ -124,12 +163,14 @@ export default function App() {
           <div className="flex items-center gap-3 min-w-0">
             <span
               className="w-2.5 h-2.5 rounded-xs shrink-0"
-              style={{ backgroundColor: currentBlueprint.color }}
+              style={{ backgroundColor: view === 'city' ? '#f59e0b' : currentScene.color }}
             />
             <h1 className="text-xs sm:text-sm font-mono font-bold tracking-wider text-slate-100 truncate">
-              {renderStyle === 'all_levels_grid'
-                ? 'BERLIN HBF - ALLE 5 EBENEN (E+2, E+1, E0, E-1, E-2) & QUERSCHNITT - GAME TILEMAP REFERENZ'
-                : currentBlueprint.headerTitle}
+              {view === 'city'
+                ? `${BERLIN_CITY.name} — STADTKARTE · ${BERLIN_CITY.subtitle}`
+                : renderStyle === 'all_levels_grid'
+                  ? `${venue.name.toUpperCase()} — ALLE EBENEN IM RASTER`
+                  : currentScene.headerTitle}
             </h1>
           </div>
 
@@ -157,18 +198,18 @@ export default function App() {
       {!hideControls && (
         <>
           {/* Right-Side Vertical Level Stack (E+2 -> E+1 -> E0 -> E-1 -> E-2 -> Querschnitt) */}
-          {renderStyle !== 'all_levels_grid' && (
+          {view === 'venue' && renderStyle !== 'all_levels_grid' && (
             <aside className="fixed right-3 top-12 z-20 flex flex-col gap-1.5 bg-[#1f232a]/92 backdrop-blur-md p-2 rounded border border-[#4b5262] shadow-xl">
               <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 px-1 flex items-center justify-between">
                 <span>Ebenen-Wahl</span>
                 <span>[1–6]</span>
               </div>
-              {STATION_BLUEPRINTS.map((bp, idx) => {
-                const isSelected = activeView === bp.viewId;
+              {scenes.map((bp, idx) => {
+                const isSelected = activeView === bp.id;
                 return (
                   <button
-                    key={bp.viewId}
-                    onClick={() => setActiveView(bp.viewId)}
+                    key={bp.id}
+                    onClick={() => setActiveView(bp.id as StationViewId)}
                     className={`group flex items-center justify-between gap-2.5 px-2.5 py-1.5 rounded text-left transition-colors border ${
                       isSelected
                         ? 'bg-slate-800 border-amber-400 text-white shadow-inner'
@@ -209,16 +250,29 @@ export default function App() {
           )}
 
           {/* Bottom-Left Architectural Details Card for the Current Level */}
-          {renderStyle !== 'all_levels_grid' && (
+          {view === 'venue' && renderStyle !== 'all_levels_grid' && (
             <div className="fixed left-3 bottom-3 z-20 max-w-md bg-[#1f232a]/90 backdrop-blur-md border border-[#4b5262] rounded p-2.5 shadow-xl pointer-events-none">
               <div className="flex items-center gap-2 mb-1">
                 <Layers className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                 <span className="text-xs font-mono font-bold text-white">
-                  {currentBlueprint.shortCode}: {currentBlueprint.subtitle}
+                  {currentScene.shortCode}: {currentScene.subtitle}
                 </span>
+                {resolvedTier && (
+                  <span
+                    className={`ml-auto px-1.5 py-0.5 rounded text-[9px] font-mono border ${
+                      resolvedTier.fellBack
+                        ? 'bg-slate-700/60 border-slate-500/50 text-slate-300'
+                        : 'bg-emerald-600/30 border-emerald-400/50 text-emerald-200'
+                    }`}
+                    title={resolvedTier.fellBack ? `Fallback auf ${resolvedTier.plate.tier}` : 'Gewünschte Stufe gefunden'}
+                  >
+                    {resolvedTier.plate.tier}
+                    {resolvedTier.fellBack ? ' ↓' : ' ✓'}
+                  </span>
+                )}
               </div>
               <ul className="grid grid-cols-1 gap-0.5 text-[11px] text-slate-300">
-                {currentBlueprint.highlights.map((h, i) => (
+                {currentScene.highlights.map((h, i) => (
                   <li key={i} className="flex items-center gap-1.5 truncate">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />
                     <span className="truncate">{h}</span>
@@ -230,6 +284,22 @@ export default function App() {
 
           {/* Bottom-Right Simulation & Render Mode Bar */}
           <div className="fixed right-3 bottom-3 z-20 flex flex-wrap items-center gap-1.5 bg-[#1f232a]/92 backdrop-blur-md border border-[#4b5262] rounded p-1.5 shadow-xl">
+            {/* City Map / Venue toggle */}
+            <button
+              onClick={() => setView((v) => (v === 'city' ? 'venue' : 'city'))}
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-mono transition-colors ${
+                view === 'city'
+                  ? 'bg-amber-500 text-slate-950 font-bold'
+                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+              }`}
+              title="Open-World-Stadtkarte (Bezirke & Orte)"
+            >
+              <Building2 className="w-3.5 h-3.5" />
+              <span>{view === 'city' ? 'Ort ansehen' : 'Stadtkarte'}</span>
+            </button>
+
+            <div className="h-4 w-px bg-slate-700 mx-0.5" />
+
             {/* Render Style Switcher */}
             <button
               onClick={() => setRenderStyle('reference_live')}
@@ -268,6 +338,32 @@ export default function App() {
             >
               <Grid className="w-3.5 h-3.5" />
               <span>Alle 6 Ebenen</span>
+            </button>
+
+            {/* Plate grading / atmosphere quality */}
+            <button
+              onClick={() =>
+                setRenderQuality((q) =>
+                  q === 'raw' ? 'graded' : q === 'graded' ? 'cinematic' : 'raw'
+                )
+              }
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-mono transition-colors ${
+                renderQuality === 'cinematic'
+                  ? 'bg-fuchsia-600/30 border border-fuchsia-400/50 text-fuchsia-200'
+                  : renderQuality === 'graded'
+                    ? 'bg-emerald-600/30 border border-emerald-400/50 text-emerald-200'
+                    : 'bg-slate-800 text-slate-400 hover:bg-slate-700'
+              }`}
+              title="Grafik-Finish der Plates: roh, gegraded oder cineastisch"
+            >
+              <Wand2 className="w-3.5 h-3.5" />
+              <span>
+                {renderQuality === 'cinematic'
+                  ? 'Cineastisch'
+                  : renderQuality === 'graded'
+                    ? 'Gegraded'
+                    : 'Roh'}
+              </span>
             </button>
 
             <div className="h-4 w-px bg-slate-700 mx-0.5" />
