@@ -35,6 +35,8 @@ export interface PlateDef {
   cropTopRatio?: number;
   /** Short note shown in the plate inspector. */
   note?: string;
+  /** When true, src is a key into the procedural renderer registry, not a URL. */
+  procedural?: boolean;
 }
 
 /**

@@ -10,6 +10,11 @@
 
 import { STATION_BLUEPRINTS, StationViewId } from '../game/stationData';
 import { CrowdRoute, PlateDef, SceneDef, VenueDef } from '../engine/types';
+import { registerProceduralRenderer } from '../engine/assets';
+import { renderE0Realistic } from '../engine/render/e0_scene';
+
+// Register the procedural E0 renderer so the asset pipeline can bake it.
+registerProceduralRenderer('procedural:e0', renderE0Realistic);
 
 const HBF_CROWD: Record<StationViewId, CrowdRoute[]> = {
   'E+2': [
@@ -70,16 +75,8 @@ function platesForView(viewId: StationViewId, referenceImage: string, altReferen
     },
   ];
 
-  // The alternate E0 image is a separate, higher-resolution generation pass —
-  // promote it to the realistic tier rather than just a blueprint variant.
+  // The alternate E0 image stays as a stylized variant for the variant switcher.
   if (altReferenceImage) {
-    plates.push({
-      tier: 'realistic',
-      src: altReferenceImage,
-      cropTopRatio: 0.062,
-      note: 'Hochauflösende Realismus-Pass (E0)',
-    });
-    // Keep the stylized variant too, for the variant switcher.
     plates.push({
       tier: 'stylized',
       src: altReferenceImage,
@@ -91,19 +88,34 @@ function platesForView(viewId: StationViewId, referenceImage: string, altReferen
   return plates;
 }
 
-export const BERLIN_HBF_SCENES: SceneDef[] = STATION_BLUEPRINTS.map((bp) => ({
-  id: bp.viewId,
-  venueId: 'berlin-hbf',
-  level: bp.levelId,
-  shortCode: bp.shortCode,
-  subtitle: bp.subtitle,
-  headerTitle: bp.headerTitle,
-  color: bp.color,
-  accentColor: bp.accentColor,
-  highlights: bp.highlights,
-  plates: platesForView(bp.viewId, bp.referenceImage, bp.altReferenceImage),
-  crowd: HBF_CROWD[bp.viewId] ?? [],
-}));
+export const BERLIN_HBF_SCENES: SceneDef[] = STATION_BLUEPRINTS.map((bp) => {
+  const plates = platesForView(bp.viewId, bp.referenceImage, bp.altReferenceImage);
+
+  // E0 gets a procedural realistic plate — a high-detail isometric render of
+  // the ground floor.  Other scenes fall back to stylized via the resolver.
+  if (bp.viewId === 'E0') {
+    plates.unshift({
+      tier: 'realistic',
+      src: 'procedural:e0',
+      procedural: true,
+      note: 'Prozedurale Realismus-Szene (E0)',
+    });
+  }
+
+  return {
+    id: bp.viewId,
+    venueId: 'berlin-hbf',
+    level: bp.levelId,
+    shortCode: bp.shortCode,
+    subtitle: bp.subtitle,
+    headerTitle: bp.headerTitle,
+    color: bp.color,
+    accentColor: bp.accentColor,
+    highlights: bp.highlights,
+    plates,
+    crowd: HBF_CROWD[bp.viewId] ?? [],
+  };
+});
 
 export const BERLIN_HBF: VenueDef = {
   id: 'berlin-hbf',

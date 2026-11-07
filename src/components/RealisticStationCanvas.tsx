@@ -9,7 +9,7 @@ import {
 import { Camera } from '../engine/camera';
 import { atmosphereForMinutes } from '../engine/atmosphere';
 import { AssetTier, PlateDef, RenderQuality, SceneDef, VenueDef } from '../engine/types';
-import { getBakedPlate, isReady, loadImage, resolvePlate } from '../engine/assets';
+import { bakeProceduralPlate, getBakedPlate, isReady, loadImage, resolvePlate } from '../engine/assets';
 import { drawScenePlate, plateSourceSize } from '../engine/render/plate';
 import {
   drawCommuter,
@@ -106,6 +106,13 @@ function resolveSceneArt(
 ): ResolvedSceneArt | null {
   const plate = resolvePlate(scene.plates, tier, useAltVariant ? 'b' : undefined);
   if (!plate) return null;
+
+  // Procedural plates are rendered on demand, not loaded from a URL.
+  if (plate.procedural) {
+    const baked = bakeProceduralPlate(plate.src, quality);
+    if (!baked) return null;
+    return { plate, source: baked, width: baked.width, height: baked.height };
+  }
 
   const img = loadImage(plate.src);
   if (!isReady(img)) return null;

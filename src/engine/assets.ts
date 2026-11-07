@@ -78,6 +78,21 @@ export function resolvePlateInfo(
 const BAKE_MAX_WIDTH = 4096;
 const baked = new Map<string, HTMLCanvasElement>();
 
+// === Procedural plate registry ===
+
+const proceduralRenderers = new Map<
+  string,
+  (ctx: CanvasRenderingContext2D, w: number, h: number) => void
+>();
+
+/** Register a procedural renderer under a src key (e.g. "procedural:e0"). */
+export function registerProceduralRenderer(
+  src: string,
+  fn: (ctx: CanvasRenderingContext2D, w: number, h: number) => void
+) {
+  proceduralRenderers.set(src, fn);
+}
+
 const QUALITY_GRADE: Record<RenderQuality, string> = {
   raw: 'none',
   graded: 'contrast(1.08) saturate(1.14) brightness(1.02)',
@@ -195,45 +210,87 @@ export function getBakedPlate(
   unsharpPass(ctx, canvas, targetW, targetH, sharpAmount);
 
   if (quality === 'cinematic') {
-    // Split-tone: cool shadows, warm highlights — reads as "painted light".
-    const cool = ctx.createLinearGradient(0, 0, 0, targetH);
-    cool.addColorStop(0, 'rgba(255, 224, 178, 0.10)');
-    cool.addColorStop(0.55, 'rgba(0, 0, 0, 0)');
-    cool.addColorStop(1, 'rgba(24, 48, 88, 0.16)');
-    ctx.globalCompositeOperation = 'overlay';
-    ctx.fillStyle = cool;
-    ctx.fillRect(0, 0, targetW, targetH);
-    ctx.globalCompositeOperation = 'source-over';
-
-    // Film grain: stamp noise with soft-light at very low opacity.
-    const grain = getGrainTile();
-    ctx.save();
-    ctx.globalCompositeOperation = 'soft-light';
-    ctx.globalAlpha = 0.04;
-    for (let y = 0; y < targetH; y += 256) {
-      for (let x = 0; x < targetW; x += 256) {
-        ctx.drawImage(grain, x, y);
-      }
-    }
-    ctx.restore();
-
-    // Baked vignette pulls the eye to the centre of the scene.
-    const vignette = ctx.createRadialGradient(
-      targetW * 0.5,
-      targetH * 0.48,
-      Math.min(targetW, targetH) * 0.28,
-      targetW * 0.5,
-      targetH * 0.5,
-      Math.max(targetW, targetH) * 0.72
-    );
-    vignette.addColorStop(0, 'rgba(0,0,0,0)');
-    vignette.addColorStop(1, 'rgba(6, 10, 20, 0.38)');
-    ctx.fillStyle = vignette;
-    ctx.fillRect(0, 0, targetW, targetH);
+    applyCinematicEffects(ctx, targetW, targetH);
   }
 
   baked.set(key, canvas);
   return canvas;
+}
+
+/** Shared cinematic post-processing: split-tone, grain, vignette. */
+function applyCinematicEffects(ctx: CanvasRenderingContext2D, w: number, h: number) {
+  const cool = ctx.createLinearGradient(0, 0, 0, h);
+  cool.addColorStop(0, 'rgba(255, 224, 178, 0.10)');
+  cool.addColorStop(0.55, 'rgba(0, 0, 0, 0)');
+  cool.addColorStop(1, 'rgba(24, 48, 88, 0.16)');
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.fillStyle = cool;
+  ctx.fillRect(0, 0, w, h);
+  ctx.globalCompositeOperation = 'source-over';
+
+  const grain = getGrainTile();
+  ctx.save();
+  ctx.globalCompositeOperation = 'soft-light';
+  ctx.globalAlpha = 0.04;
+  for (let y = 0; y < h; y += 256) {
+    for (let x = 0; x < w; x += 256) {
+      ctx.drawImage(grain, x, y);
+    }
+  }
+  ctx.restore();
+
+  const vignette = ctx.createRadialGradient(
+    w * 0.5, h * 0.48, Math.min(w, h) * 0.28,
+    w * 0.5, h * 0.5, Math.max(w, h) * 0.72
+  );
+  vignette.addColorStop(0, 'rgba(0,0,0,0)');
+  vignette.addColorStop(1, 'rgba(6, 10, 20, 0.38)');
+  ctx.fillStyle = vignette;
+  ctx.fillRect(0, 0, w, h);
+}
+
+/**
+ * Bake a procedural plate: render the scene to a high-res canvas, then apply
+ * the same quality grade, sharpening and cinematic effects as image plates.
+ */
+export function bakeProceduralPlate(
+  src: string,
+  quality: RenderQuality
+): HTMLCanvasElement | null {
+  const key = `${src}|${quality}`;
+  const cached = baked.get(key);
+  if (cached) return cached;
+
+  const renderFn = proceduralRenderers.get(src);
+  if (!renderFn) return null;
+
+  const RW = 2880, RH = 1620;
+  const temp = document.createElement('canvas');
+  temp.width = RW;
+  temp.height = RH;
+  const tctx = temp.getContext('2d');
+  if (!tctx) return null;
+  renderFn(tctx, RW, RH);
+
+  const result = document.createElement('canvas');
+  result.width = RW;
+  result.height = RH;
+  const rctx = result.getContext('2d');
+  if (!rctx) return null;
+
+  rctx.filter = QUALITY_GRADE[quality];
+  rctx.drawImage(temp, 0, 0);
+  rctx.filter = 'none';
+
+  const sharpAmount = quality === 'raw' ? 0.18 : quality === 'graded' ? 0.28 : 0.38;
+  unsharpPass(rctx, result, RW, RH, sharpAmount);
+
+  if (quality === 'cinematic') {
+    applyCinematicEffects(rctx, RW, RH);
+  }
+
+  baked.set(key, result);
+  return result;
 }
 
 /** Drop cached bakes for one source (used when a plate is replaced at runtime). */
