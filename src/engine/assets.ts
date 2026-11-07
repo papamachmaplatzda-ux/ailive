@@ -75,14 +75,65 @@ export function resolvePlateInfo(
   return { plate, requested: wanted, fellBack: plate.tier !== wanted };
 }
 
-const BAKE_MAX_WIDTH = 2048;
+const BAKE_MAX_WIDTH = 4096;
 const baked = new Map<string, HTMLCanvasElement>();
 
 const QUALITY_GRADE: Record<RenderQuality, string> = {
   raw: 'none',
-  graded: 'contrast(1.06) saturate(1.1) brightness(1.02)',
-  cinematic: 'contrast(1.13) saturate(1.18) brightness(1.03)',
+  graded: 'contrast(1.08) saturate(1.14) brightness(1.02)',
+  cinematic: 'contrast(1.16) saturate(1.22) brightness(1.03)',
 };
+
+/**
+ * Unsharp mask: draw a blurred copy with "overlay" then subtract the blur —
+ * cheap sharpening that crisps edges the stepped downscale softens.
+ */
+function unsharpPass(
+  ctx: CanvasRenderingContext2D,
+  canvas: HTMLCanvasElement,
+  w: number,
+  h: number,
+  amount: number
+) {
+  const blur = document.createElement('canvas');
+  blur.width = w;
+  blur.height = h;
+  const bctx = blur.getContext('2d');
+  if (!bctx) return;
+  bctx.filter = `blur(${Math.max(1, w * 0.0008)}px)`;
+  bctx.drawImage(canvas, 0, 0);
+  ctx.save();
+  ctx.globalCompositeOperation = 'overlay';
+  ctx.globalAlpha = amount;
+  ctx.drawImage(blur, 0, 0);
+  ctx.restore();
+}
+
+/**
+ * Subtle film grain: pre-rendered noise tile stamped with "soft-light" so the
+ * plate reads as photographed, not CG-flat.
+ */
+let grainTile: HTMLCanvasElement | null = null;
+function getGrainTile(): HTMLCanvasElement {
+  if (grainTile) return grainTile;
+  const size = 256;
+  const tile = document.createElement('canvas');
+  tile.width = size;
+  tile.height = size;
+  const gctx = tile.getContext('2d');
+  if (!gctx) return tile;
+  const imageData = gctx.createImageData(size, size);
+  for (let i = 0; i < imageData.data.length; i += 4) {
+    const v = Math.random() * 255;
+    imageData.data[i] = v;
+    imageData.data[i + 1] = v;
+    imageData.data[i + 2] = v;
+    imageData.data[i + 3] = 255;
+  }
+  gctx.putImageData(imageData, 0, 0);
+  grainTile = tile;
+  return tile;
+}
 
 function stepperDownscale(
   ctx: CanvasRenderingContext2D,
@@ -139,6 +190,10 @@ export function getBakedPlate(
 
   stepperDownscale(ctx, img, targetW, targetH, QUALITY_GRADE[quality]);
 
+  // Sharpening pass — crisp edges the stepped downscale softens.
+  const sharpAmount = quality === 'raw' ? 0.18 : quality === 'graded' ? 0.28 : 0.38;
+  unsharpPass(ctx, canvas, targetW, targetH, sharpAmount);
+
   if (quality === 'cinematic') {
     // Split-tone: cool shadows, warm highlights — reads as "painted light".
     const cool = ctx.createLinearGradient(0, 0, 0, targetH);
@@ -149,6 +204,18 @@ export function getBakedPlate(
     ctx.fillStyle = cool;
     ctx.fillRect(0, 0, targetW, targetH);
     ctx.globalCompositeOperation = 'source-over';
+
+    // Film grain: stamp noise with soft-light at very low opacity.
+    const grain = getGrainTile();
+    ctx.save();
+    ctx.globalCompositeOperation = 'soft-light';
+    ctx.globalAlpha = 0.04;
+    for (let y = 0; y < targetH; y += 256) {
+      for (let x = 0; x < targetW; x += 256) {
+        ctx.drawImage(grain, x, y);
+      }
+    }
+    ctx.restore();
 
     // Baked vignette pulls the eye to the centre of the scene.
     const vignette = ctx.createRadialGradient(

@@ -22,7 +22,8 @@ import {
 import { StationViewId } from './game/stationData';
 import { BERLIN_CITY } from './world/berlinCity';
 import { entranceScene, getVenue } from './world/registry';
-import { RenderQuality, SceneDef } from './engine/types';
+import { AssetTier, RenderQuality, SceneDef } from './engine/types';
+import { resolvePlateInfo } from './engine/assets';
 import { CityMapCanvas } from './components/CityMapCanvas';
 import {
   createInitialTimetable,
@@ -60,6 +61,11 @@ export default function App() {
   const scenes: SceneDef[] = venue.scenes;
   const currentScene: SceneDef =
     scenes.find((s) => s.id === activeView) ?? scenes[0];
+
+  // Show which asset tier the engine resolved for the active scene.
+  const resolvedTier = currentScene
+    ? resolvePlateInfo(currentScene.plates, 'realistic', useAltE0Variant ? 'b' : undefined)
+    : null;
 
   const enterVenue = (nextVenueId: string) => {
     const next = getVenue(nextVenueId);
@@ -251,6 +257,19 @@ export default function App() {
                 <span className="text-xs font-mono font-bold text-white">
                   {currentScene.shortCode}: {currentScene.subtitle}
                 </span>
+                {resolvedTier && (
+                  <span
+                    className={`ml-auto px-1.5 py-0.5 rounded text-[9px] font-mono border ${
+                      resolvedTier.fellBack
+                        ? 'bg-slate-700/60 border-slate-500/50 text-slate-300'
+                        : 'bg-emerald-600/30 border-emerald-400/50 text-emerald-200'
+                    }`}
+                    title={resolvedTier.fellBack ? `Fallback auf ${resolvedTier.plate.tier}` : 'Gewünschte Stufe gefunden'}
+                  >
+                    {resolvedTier.plate.tier}
+                    {resolvedTier.fellBack ? ' ↓' : ' ✓'}
+                  </span>
+                )}
               </div>
               <ul className="grid grid-cols-1 gap-0.5 text-[11px] text-slate-300">
                 {currentScene.highlights.map((h, i) => (

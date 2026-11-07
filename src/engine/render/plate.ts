@@ -71,6 +71,20 @@ export function drawScenePlate(
   }
 
   if (quality !== 'raw' && atmosphere) {
+    // Atmospheric perspective: subtle cool haze at the top of the plate that
+    // fades to clear toward the bottom — adds depth as if the far end of the
+    // hall recedes into air. Faint at graded, slightly stronger at cinematic.
+    ctx.save();
+    ctx.globalCompositeOperation = 'screen';
+    ctx.globalAlpha = alpha * (quality === 'cinematic' ? 0.07 : 0.04);
+    const haze = ctx.createLinearGradient(rect.x, rect.y, rect.x, rect.y + rect.h);
+    haze.addColorStop(0, 'rgba(200, 220, 240, 0.5)');
+    haze.addColorStop(0.4, 'rgba(200, 220, 240, 0)');
+    haze.addColorStop(1, 'rgba(200, 220, 240, 0)');
+    ctx.fillStyle = haze;
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    ctx.restore();
+
     // Tint: multiply keeps the art's contrast while shifting its time of day.
     if (atmosphere.tintAlpha > 0.001) {
       ctx.globalCompositeOperation = 'multiply';

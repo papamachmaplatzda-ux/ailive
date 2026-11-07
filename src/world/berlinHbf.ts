@@ -53,23 +53,39 @@ const HBF_CROWD: Record<StationViewId, CrowdRoute[]> = {
   ],
 };
 
-/** The AI-generated plates are the current art tier ("blueprint") of the station. */
+/**
+ * The AI-generated plates are the "stylized" art tier: detailed illustrations,
+ * not raw engineering blueprints. A "realistic" tier (higher-fidelity render
+ * pass) can be added per scene; when absent the resolver falls back to
+ * stylized so the scene never goes dark. The E0 entrance scene already has a
+ * second, higher-resolution generation pass that serves as its realistic plate.
+ */
 function platesForView(viewId: StationViewId, referenceImage: string, altReferenceImage?: string): PlateDef[] {
   const plates: PlateDef[] = [
     {
-      tier: 'blueprint',
+      tier: 'stylized',
       src: referenceImage,
       cropTopRatio: viewId === 'CUTAWAY' ? 0 : 0.062,
-      note: 'AI-Illustration (Originalebene)',
+      note: 'AI-Illustration (stilisierte Ebene)',
     },
   ];
+
+  // The alternate E0 image is a separate, higher-resolution generation pass —
+  // promote it to the realistic tier rather than just a blueprint variant.
   if (altReferenceImage) {
     plates.push({
-      tier: 'blueprint',
+      tier: 'realistic',
+      src: altReferenceImage,
+      cropTopRatio: 0.062,
+      note: 'Hochauflösende Realismus-Pass (E0)',
+    });
+    // Keep the stylized variant too, for the variant switcher.
+    plates.push({
+      tier: 'stylized',
       src: altReferenceImage,
       variant: 'b',
       cropTopRatio: 0.062,
-      note: 'Alternative Fassung',
+      note: 'Alternative stilisierte Fassung',
     });
   }
   return plates;
